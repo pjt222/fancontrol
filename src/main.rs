@@ -1,6 +1,7 @@
 mod cli;
 mod errors;
 mod fan;
+mod gui;
 mod platform;
 
 use std::thread;
@@ -14,13 +15,19 @@ use platform::{create_controller, FanController};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let controller = create_controller();
 
     match cli.command {
-        Commands::List => cmd_list(&*controller),
-        Commands::Get { fan_id } => cmd_get(&*controller, &fan_id),
-        Commands::Set { fan_id, pwm } => cmd_set(&*controller, &fan_id, pwm),
-        Commands::Monitor { interval } => cmd_monitor(&*controller, interval),
+        Commands::Gui => gui::run(),
+        other => {
+            let controller = create_controller();
+            match other {
+                Commands::List => cmd_list(&*controller),
+                Commands::Get { fan_id } => cmd_get(&*controller, &fan_id),
+                Commands::Set { fan_id, pwm } => cmd_set(&*controller, &fan_id, pwm),
+                Commands::Monitor { interval } => cmd_monitor(&*controller, interval),
+                Commands::Gui => unreachable!(),
+            }
+        }
     }
 }
 

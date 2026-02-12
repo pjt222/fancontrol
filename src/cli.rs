@@ -36,4 +36,7 @@ pub enum Commands {
         #[arg(short, long, default_value = "1")]
         interval: u64,
     },
+
+    /// Open the graphical fan control interface
+    Gui,
 }
