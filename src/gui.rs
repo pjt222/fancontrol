@@ -116,7 +116,8 @@ impl FanControlApp {
                         // Only set slider on first discovery — never overwrite
                         // the user's target from backend readback.
                         if let Some(pwm) = fan.pwm {
-                            self.slider_values.entry(fan.id.clone()).or_insert(pwm as f32);
+                            self.slider_values.entry(fan.id.clone())
+                                .or_insert((pwm as f32).max(1.0));
                         }
                     }
                     self.fans = fans;
@@ -194,6 +195,7 @@ impl eframe::App for FanControlApp {
 
                         // Actual readback from hardware.
                         ui.horizontal(|ui| {
+                            ui.label("Now:");
                             ui.label(format!("{} RPM", fan.speed_rpm));
                             if let Some(pwm) = fan.pwm {
                                 ui.separator();
@@ -225,7 +227,7 @@ impl eframe::App for FanControlApp {
                                 let previous_value = *slider_value;
 
                                 ui.horizontal(|ui| {
-                                    ui.label("PWM");
+                                    ui.label("Target:");
                                     ui.add_enabled_ui(!is_auto, |ui| {
                                         let response = ui.add(
                                             egui::Slider::new(slider_value, 1.0..=255.0)
