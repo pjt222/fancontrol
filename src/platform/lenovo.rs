@@ -155,6 +155,16 @@ impl FanController for LenovoFanController {
 
         Ok(())
     }
+
+    fn stop_fan(&self, fan_id: &str) -> Result<(), FanControlError> {
+        let numeric_id = parse_fan_id(fan_id)?;
+        let script = format!(
+            "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
+             $fm.Fan_SetCurrentFanSpeed({numeric_id}, 0)"
+        );
+        Self::ps_command(&script)?;
+        Ok(())
+    }
 }
 
 /// Parse a fan ID string like "fan0" or "fan1" into a numeric ID.

@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use eframe::egui;
 
@@ -21,11 +21,13 @@ use crate::platform::create_controller;
 enum WorkerCommand {
     Refresh,
     SetPwm { fan_id: String, pwm: u8 },
+    StopFan { fan_id: String },
 }
 
 enum WorkerResponse {
     FanData(Vec<Fan>),
     PwmSet { fan_id: String, pwm: u8 },
+    FanStopped { fan_id: String },
     Error(String),
 }
 
@@ -69,6 +71,12 @@ fn spawn_worker(
                         Err(error) => { let _ = response_tx.send(WorkerResponse::Error(error.to_string())); }
                     }
                 }
+                WorkerCommand::StopFan { fan_id } => {
+                    match controller.stop_fan(&fan_id) {
+                        Ok(()) => { let _ = response_tx.send(WorkerResponse::FanStopped { fan_id }); }
+                        Err(error) => { let _ = response_tx.send(WorkerResponse::Error(error.to_string())); }
+                    }
+                }
             }
 
             repaint_ctx.request_repaint();
@@ -83,7 +91,6 @@ fn spawn_worker(
 struct FanControlApp {
     fans: Vec<Fan>,
     slider_values: HashMap<String, f32>,
-    pending_pwm: HashMap<String, (f32, Instant)>,
     auto_mode: HashMap<String, bool>,
     status_message: String,
     command_tx: mpsc::Sender<WorkerCommand>,
@@ -98,7 +105,6 @@ impl FanControlApp {
         Self {
             fans: Vec::new(),
             slider_values: HashMap::new(),
-            pending_pwm: HashMap::new(),
             auto_mode: HashMap::new(),
             status_message: "Discovering fans...".into(),
             command_tx,
@@ -113,8 +119,6 @@ impl FanControlApp {
                     for fan in &fans {
                         self.auto_mode.entry(fan.id.clone()).or_insert(true);
 
-                        // Only set slider on first discovery — never overwrite
-                        // the user's target from backend readback.
                         if let Some(pwm) = fan.pwm {
                             self.slider_values.entry(fan.id.clone())
                                 .or_insert((pwm as f32).max(1.0));
@@ -126,30 +130,13 @@ impl FanControlApp {
                 WorkerResponse::PwmSet { fan_id, pwm } => {
                     self.status_message = format!("Set {} PWM to {}", fan_id, pwm);
                 }
+                WorkerResponse::FanStopped { fan_id } => {
+                    self.status_message = format!("Stopped {}", fan_id);
+                }
                 WorkerResponse::Error(message) => {
                     self.status_message = format!("Error: {}", message);
                 }
             }
-        }
-    }
-
-    fn flush_pending_pwm(&mut self) {
-        let cutoff = Duration::from_millis(300);
-        let now = Instant::now();
-
-        let ready: Vec<(String, f32)> = self
-            .pending_pwm
-            .iter()
-            .filter(|(_, (_, timestamp))| now.duration_since(*timestamp) >= cutoff)
-            .map(|(fan_id, (value, _))| (fan_id.clone(), *value))
-            .collect();
-
-        for (fan_id, value) in ready {
-            self.pending_pwm.remove(&fan_id);
-            let _ = self.command_tx.send(WorkerCommand::SetPwm {
-                fan_id,
-                pwm: value as u8,
-            });
         }
     }
 }
@@ -157,7 +144,6 @@ impl FanControlApp {
 impl eframe::App for FanControlApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_responses();
-        self.flush_pending_pwm();
 
         // Top panel — header.
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
@@ -184,7 +170,6 @@ impl eframe::App for FanControlApp {
                     return;
                 }
 
-                // Clone fan list to avoid borrow conflicts with self.
                 let fans: Vec<Fan> = self.fans.clone();
 
                 for fan in &fans {
@@ -206,49 +191,44 @@ impl eframe::App for FanControlApp {
                         if fan.controllable {
                             let is_auto = self.auto_mode.get(&fan.id).copied().unwrap_or(true);
 
-                            // Auto mode toggle.
+                            // Auto mode toggle + Kill button.
                             ui.horizontal(|ui| {
                                 let mut auto_checked = is_auto;
                                 if ui.checkbox(&mut auto_checked, "Auto").changed() {
                                     self.auto_mode.insert(fan.id.clone(), auto_checked);
                                     if auto_checked {
-                                        // Return to BIOS control.
-                                        self.pending_pwm.remove(&fan.id);
                                         let _ = self.command_tx.send(WorkerCommand::SetPwm {
                                             fan_id: fan.id.clone(),
                                             pwm: 0,
                                         });
                                     }
                                 }
+
+                                if ui.button("Kill").clicked() {
+                                    self.auto_mode.insert(fan.id.clone(), false);
+                                    let _ = self.command_tx.send(WorkerCommand::StopFan {
+                                        fan_id: fan.id.clone(),
+                                    });
+                                }
                             });
 
-                            // PWM slider — disabled in auto mode.
+                            // PWM slider + Set button — disabled in auto mode.
                             if let Some(slider_value) = self.slider_values.get_mut(&fan.id) {
-                                let previous_value = *slider_value;
-
                                 ui.horizontal(|ui| {
                                     ui.label("Target:");
                                     ui.add_enabled_ui(!is_auto, |ui| {
-                                        let response = ui.add(
+                                        ui.add(
                                             egui::Slider::new(slider_value, 1.0..=255.0)
                                                 .step_by(1.0)
                                                 .fixed_decimals(0),
                                         );
-
-                                        if response.changed() && *slider_value != previous_value {
-                                            self.pending_pwm
-                                                .insert(fan.id.clone(), (*slider_value, Instant::now()));
-                                        }
-
-                                        if response.drag_stopped() {
-                                            if let Some((value, _)) = self.pending_pwm.remove(&fan.id) {
-                                                let _ = self.command_tx.send(WorkerCommand::SetPwm {
-                                                    fan_id: fan.id.clone(),
-                                                    pwm: value as u8,
-                                                });
-                                            }
-                                        }
                                     });
+                                    if ui.add_enabled(!is_auto, egui::Button::new("Set")).clicked() {
+                                        let _ = self.command_tx.send(WorkerCommand::SetPwm {
+                                            fan_id: fan.id.clone(),
+                                            pwm: *slider_value as u8,
+                                        });
+                                    }
                                 });
                             }
                         } else {
@@ -260,11 +240,6 @@ impl eframe::App for FanControlApp {
                 }
             });
         });
-
-        // Request repaint while there are pending PWM values so flush_pending_pwm fires.
-        if !self.pending_pwm.is_empty() {
-            ctx.request_repaint_after(Duration::from_millis(100));
-        }
     }
 }
 

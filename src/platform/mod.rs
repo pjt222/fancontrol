@@ -18,6 +18,12 @@ pub trait FanController {
 
     /// Set PWM duty cycle (0–255) for a fan by its id.
     fn set_pwm(&self, fan_id: &str, pwm: u8) -> Result<(), FanControlError>;
+
+    /// Force-stop a fan (0 RPM). Default calls set_pwm(0); override for
+    /// platforms where PWM 0 means something else (e.g. Lenovo auto mode).
+    fn stop_fan(&self, fan_id: &str) -> Result<(), FanControlError> {
+        self.set_pwm(fan_id, 0)
+    }
 }
 
 /// Create the platform-appropriate controller.
