@@ -84,7 +84,6 @@ struct FanControlApp {
     fans: Vec<Fan>,
     slider_values: HashMap<String, f32>,
     pending_pwm: HashMap<String, (f32, Instant)>,
-    dragging: HashMap<String, bool>,
     auto_mode: HashMap<String, bool>,
     status_message: String,
     command_tx: mpsc::Sender<WorkerCommand>,
@@ -100,7 +99,6 @@ impl FanControlApp {
             fans: Vec::new(),
             slider_values: HashMap::new(),
             pending_pwm: HashMap::new(),
-            dragging: HashMap::new(),
             auto_mode: HashMap::new(),
             status_message: "Discovering fans...".into(),
             command_tx,
@@ -113,14 +111,12 @@ impl FanControlApp {
             match response {
                 WorkerResponse::FanData(fans) => {
                     for fan in &fans {
-                        // Initialize auto_mode for newly discovered fans.
                         self.auto_mode.entry(fan.id.clone()).or_insert(true);
 
+                        // Only set slider on first discovery — never overwrite
+                        // the user's target from backend readback.
                         if let Some(pwm) = fan.pwm {
-                            let is_dragging = self.dragging.get(&fan.id).copied().unwrap_or(false);
-                            if !is_dragging && !self.pending_pwm.contains_key(&fan.id) {
-                                self.slider_values.insert(fan.id.clone(), pwm as f32);
-                            }
+                            self.slider_values.entry(fan.id.clone()).or_insert(pwm as f32);
                         }
                     }
                     self.fans = fans;
@@ -195,7 +191,15 @@ impl eframe::App for FanControlApp {
                         ui.set_min_width(ui.available_width());
 
                         ui.strong(&fan.label);
-                        ui.label(format!("{} RPM", fan.speed_rpm));
+
+                        // Actual readback from hardware.
+                        ui.horizontal(|ui| {
+                            ui.label(format!("{} RPM", fan.speed_rpm));
+                            if let Some(pwm) = fan.pwm {
+                                ui.separator();
+                                ui.label(format!("PWM {}", pwm));
+                            }
+                        });
 
                         if fan.controllable {
                             let is_auto = self.auto_mode.get(&fan.id).copied().unwrap_or(true);
@@ -229,17 +233,12 @@ impl eframe::App for FanControlApp {
                                                 .fixed_decimals(0),
                                         );
 
-                                        if response.drag_started() {
-                                            self.dragging.insert(fan.id.clone(), true);
-                                        }
-
                                         if response.changed() && *slider_value != previous_value {
                                             self.pending_pwm
                                                 .insert(fan.id.clone(), (*slider_value, Instant::now()));
                                         }
 
                                         if response.drag_stopped() {
-                                            self.dragging.insert(fan.id.clone(), false);
                                             if let Some((value, _)) = self.pending_pwm.remove(&fan.id) {
                                                 let _ = self.command_tx.send(WorkerCommand::SetPwm {
                                                     fan_id: fan.id.clone(),
