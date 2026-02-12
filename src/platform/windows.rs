@@ -13,6 +13,34 @@ use crate::errors::FanControlError;
 use crate::fan::Fan;
 use super::FanController;
 
+/// Detect whether this machine is a Lenovo system.
+pub fn is_lenovo() -> bool {
+    let com = match COMLibrary::new() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let wmi = match WMIConnection::new(com) {
+        Ok(w) => w,
+        Err(_) => return false,
+    };
+
+    #[derive(Deserialize)]
+    #[serde(rename = "Win32_ComputerSystem")]
+    #[serde(rename_all = "PascalCase")]
+    struct ComputerSystem {
+        manufacturer: String,
+    }
+
+    let results: Vec<ComputerSystem> = wmi
+        .raw_query("SELECT Manufacturer FROM Win32_ComputerSystem")
+        .unwrap_or_default();
+
+    results
+        .first()
+        .map(|cs| cs.manufacturer.to_uppercase().contains("LENOVO"))
+        .unwrap_or(false)
+}
+
 // ---------------------------------------------------------------------------
 // WMI data model
 // ---------------------------------------------------------------------------

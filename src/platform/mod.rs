@@ -1,6 +1,8 @@
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "windows")]
+mod lenovo;
+#[cfg(target_os = "windows")]
 mod windows;
 
 use crate::errors::FanControlError;
@@ -26,7 +28,11 @@ pub fn create_controller() -> Box<dyn FanController> {
     }
     #[cfg(target_os = "windows")]
     {
-        Box::new(windows::WindowsFanController::new())
+        if windows::is_lenovo() {
+            Box::new(lenovo::LenovoFanController::new())
+        } else {
+            Box::new(windows::WindowsFanController::new())
+        }
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
