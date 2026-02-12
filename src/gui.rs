@@ -85,6 +85,7 @@ struct FanControlApp {
     slider_values: HashMap<String, f32>,
     pending_pwm: HashMap<String, (f32, Instant)>,
     dragging: HashMap<String, bool>,
+    auto_mode: HashMap<String, bool>,
     status_message: String,
     command_tx: mpsc::Sender<WorkerCommand>,
     response_rx: mpsc::Receiver<WorkerResponse>,
@@ -100,6 +101,7 @@ impl FanControlApp {
             slider_values: HashMap::new(),
             pending_pwm: HashMap::new(),
             dragging: HashMap::new(),
+            auto_mode: HashMap::new(),
             status_message: "Discovering fans...".into(),
             command_tx,
             response_rx,
@@ -111,6 +113,9 @@ impl FanControlApp {
             match response {
                 WorkerResponse::FanData(fans) => {
                     for fan in &fans {
+                        // Initialize auto_mode for newly discovered fans.
+                        self.auto_mode.entry(fan.id.clone()).or_insert(true);
+
                         if let Some(pwm) = fan.pwm {
                             let is_dragging = self.dragging.get(&fan.id).copied().unwrap_or(false);
                             if !is_dragging && !self.pending_pwm.contains_key(&fan.id) {
@@ -193,36 +198,56 @@ impl eframe::App for FanControlApp {
                         ui.label(format!("{} RPM", fan.speed_rpm));
 
                         if fan.controllable {
+                            let is_auto = self.auto_mode.get(&fan.id).copied().unwrap_or(true);
+
+                            // Auto mode toggle.
+                            ui.horizontal(|ui| {
+                                let mut auto_checked = is_auto;
+                                if ui.checkbox(&mut auto_checked, "Auto").changed() {
+                                    self.auto_mode.insert(fan.id.clone(), auto_checked);
+                                    if auto_checked {
+                                        // Return to BIOS control.
+                                        self.pending_pwm.remove(&fan.id);
+                                        let _ = self.command_tx.send(WorkerCommand::SetPwm {
+                                            fan_id: fan.id.clone(),
+                                            pwm: 0,
+                                        });
+                                    }
+                                }
+                            });
+
+                            // PWM slider — disabled in auto mode.
                             if let Some(slider_value) = self.slider_values.get_mut(&fan.id) {
                                 let previous_value = *slider_value;
 
                                 ui.horizontal(|ui| {
                                     ui.label("PWM");
-                                    let response = ui.add(
-                                        egui::Slider::new(slider_value, 0.0..=255.0)
-                                            .step_by(1.0)
-                                            .fixed_decimals(0),
-                                    );
+                                    ui.add_enabled_ui(!is_auto, |ui| {
+                                        let response = ui.add(
+                                            egui::Slider::new(slider_value, 1.0..=255.0)
+                                                .step_by(1.0)
+                                                .fixed_decimals(0),
+                                        );
 
-                                    if response.drag_started() {
-                                        self.dragging.insert(fan.id.clone(), true);
-                                    }
-
-                                    if response.changed() && *slider_value != previous_value {
-                                        self.pending_pwm
-                                            .insert(fan.id.clone(), (*slider_value, Instant::now()));
-                                    }
-
-                                    if response.drag_stopped() {
-                                        self.dragging.insert(fan.id.clone(), false);
-                                        // Send immediately on release.
-                                        if let Some((value, _)) = self.pending_pwm.remove(&fan.id) {
-                                            let _ = self.command_tx.send(WorkerCommand::SetPwm {
-                                                fan_id: fan.id.clone(),
-                                                pwm: value as u8,
-                                            });
+                                        if response.drag_started() {
+                                            self.dragging.insert(fan.id.clone(), true);
                                         }
-                                    }
+
+                                        if response.changed() && *slider_value != previous_value {
+                                            self.pending_pwm
+                                                .insert(fan.id.clone(), (*slider_value, Instant::now()));
+                                        }
+
+                                        if response.drag_stopped() {
+                                            self.dragging.insert(fan.id.clone(), false);
+                                            if let Some((value, _)) = self.pending_pwm.remove(&fan.id) {
+                                                let _ = self.command_tx.send(WorkerCommand::SetPwm {
+                                                    fan_id: fan.id.clone(),
+                                                    pwm: value as u8,
+                                                });
+                                            }
+                                        }
+                                    });
                                 });
                             }
                         } else {
