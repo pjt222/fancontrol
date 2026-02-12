@@ -158,11 +158,17 @@ impl FanController for LenovoFanController {
 
     fn stop_fan(&self, fan_id: &str) -> Result<(), FanControlError> {
         let numeric_id = parse_fan_id(fan_id)?;
-        let script = format!(
+        // Step 1: release manual override back to BIOS auto control.
+        let auto_script =
+            "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
+             $fm.Fan_Set_FullSpeed(0)";
+        Self::ps_command(auto_script)?;
+        // Step 2: request lowest possible speed.
+        let min_script = format!(
             "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
              $fm.Fan_SetCurrentFanSpeed({numeric_id}, 0)"
         );
-        Self::ps_command(&script)?;
+        Self::ps_command(&min_script)?;
         Ok(())
     }
 }
