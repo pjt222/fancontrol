@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "A minimal cross-platform app to control fan speed"
 authors = ["Philipp Thoss <ph.thoss@gmx.de>"]
+license = "MIT"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
