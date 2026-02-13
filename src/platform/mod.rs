@@ -1,4 +1,4 @@
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 mod lenovo;
 #[cfg(target_os = "linux")]
 mod linux;
