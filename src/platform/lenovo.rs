@@ -301,20 +301,6 @@ impl FanController for LenovoFanController {
         Ok(())
     }
 
-    fn stop_fan(&self, _fan_id: &str) -> Result<(), FanControlError> {
-        let script = "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
-             $fm.Fan_Set_FullSpeed(0)";
-        Self::ps_command(script)?;
-        Ok(())
-    }
-
-    fn is_full_speed(&self) -> Result<bool, FanControlError> {
-        let script = "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
-             ($fm.Fan_Get_FullSpeed()).Status";
-        let output = Self::ps_command(script)?;
-        Ok(output.trim().eq_ignore_ascii_case("true"))
-    }
-
     fn get_fan_curves(&self) -> Result<Vec<FanCurve>, FanControlError> {
         // Dedicated query for just the table data (no speed/temp reads).
         let script = "$tables = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_TABLE_DATA; \

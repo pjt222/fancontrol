@@ -8,9 +8,6 @@ pub enum FanControlError {
     #[error("fan '{0}' is not controllable")]
     NotControllable(String),
 
-    #[error("pwm value {0} out of range (0–255)")]
-    PwmOutOfRange(u16),
-
     #[error("permission denied: {0}")]
     PermissionDenied(String),
 
