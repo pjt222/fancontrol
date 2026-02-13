@@ -113,6 +113,12 @@ Default log level is Warn.
 - Lenovo WMI `Fan_Get_Table` and `Fan_Get_MaxSpeed` return empty data on some firmware
 - Custom fan curve writing (`Fan_Set_Table`) is not yet implemented due to unknown byte format
 
+## Acknowledgments
+
+- [LenovoLegionToolkit](https://github.com/BartoszCichecki/LenovoLegionToolkit) — community knowledge of Lenovo WMI fan control classes and methods
+- [FanControl](https://github.com/Rem0o/FanControl.Releases) by Rem0o — Windows fan monitoring and control
+- [lm-sensors](https://github.com/lm-sensors/lm-sensors) — Linux hwmon sysfs conventions for fan speed and PWM control
+
 ## License
 
 [MIT](LICENSE)
