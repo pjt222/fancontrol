@@ -17,7 +17,18 @@ use simplelog::{ConfigBuilder, LevelFilter, WriteLogger};
 use cli::{Cli, Commands};
 use platform::{create_controller, FanController};
 
+fn level_from_verbosity(verbosity: u8) -> LevelFilter {
+    match verbosity {
+        0 => LevelFilter::Warn,
+        1 => LevelFilter::Info,
+        2 => LevelFilter::Debug,
+        _ => LevelFilter::Trace,
+    }
+}
+
 fn main() -> Result<()> {
+    let cli = Cli::parse();
+
     // Log to fancontrol.log next to the executable.
     let log_path = std::env::current_exe()
         .unwrap_or_default()
@@ -25,12 +36,11 @@ fn main() -> Result<()> {
         .unwrap_or(std::path::Path::new("."))
         .join("fancontrol.log");
     let log_config = ConfigBuilder::new().set_time_format_rfc3339().build();
+    let log_level = level_from_verbosity(cli.verbose);
     if let Ok(file) = File::create(&log_path) {
-        let _ = WriteLogger::init(LevelFilter::Debug, log_config, file);
+        let _ = WriteLogger::init(log_level, log_config, file);
     }
-    info!("fancontrol started");
-
-    let cli = Cli::parse();
+    info!("fancontrol started (log level: {})", log_level);
 
     match cli.command {
         Commands::Gui => gui::run(),

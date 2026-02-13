@@ -1,10 +1,14 @@
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "fancontrol")]
 #[command(about = "A minimal cross-platform app to control fan speed")]
 #[command(version)]
 pub struct Cli {
+    /// Increase log verbosity (-v = info, -vv = debug, -vvv = trace)
+    #[arg(short, long, action = ArgAction::Count, global = true)]
+    pub verbose: u8,
+
     #[command(subcommand)]
     pub command: Commands,
 }
