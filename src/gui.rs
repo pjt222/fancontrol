@@ -41,7 +41,16 @@ fn spawn_worker(
     repaint_ctx: egui::Context,
 ) {
     thread::spawn(move || {
-        let controller = create_controller();
+        let controller = match create_controller() {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = response_tx.send(WorkerResponse::Error(format!(
+                    "Failed to initialize fan controller: {e}"
+                )));
+                repaint_ctx.request_repaint();
+                return;
+            }
+        };
         // Last PWM value set by the user per fan. Re-applied each poll
         // cycle so Fn+Q or other BIOS overrides don't stick.
         let mut held_pwm: HashMap<String, u8> = HashMap::new();

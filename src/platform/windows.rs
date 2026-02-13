@@ -83,18 +83,15 @@ impl WindowsFanController {
     /// Create a new controller.
     ///
     /// Initialises COM and connects to the `root\cimv2` WMI namespace.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the COM library or the WMI connection cannot be
-    /// initialised.  In production you may want to propagate these errors
-    /// instead.
-    pub fn new() -> Self {
-        let com_library = COMLibrary::new().expect("failed to initialise COM library");
-        let wmi_connection =
-            WMIConnection::new(com_library).expect("failed to connect to WMI (root\\cimv2)");
+    pub fn new() -> Result<Self, FanControlError> {
+        let com_library = COMLibrary::new().map_err(|e| {
+            FanControlError::Platform(format!("failed to initialise COM library: {e}"))
+        })?;
+        let wmi_connection = WMIConnection::new(com_library).map_err(|e| {
+            FanControlError::Platform(format!("failed to connect to WMI (root\\cimv2): {e}"))
+        })?;
 
-        Self { wmi_connection }
+        Ok(Self { wmi_connection })
     }
 
     // -- internal helpers ---------------------------------------------------

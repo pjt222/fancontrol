@@ -29,17 +29,17 @@ pub trait FanController {
 }
 
 /// Create the platform-appropriate controller.
-pub fn create_controller() -> Box<dyn FanController> {
+pub fn create_controller() -> Result<Box<dyn FanController>, FanControlError> {
     #[cfg(target_os = "linux")]
     {
-        Box::new(linux::LinuxFanController::new())
+        Ok(Box::new(linux::LinuxFanController::new()))
     }
     #[cfg(target_os = "windows")]
     {
         if windows::is_lenovo() {
-            Box::new(lenovo::LenovoFanController::new())
+            Ok(Box::new(lenovo::LenovoFanController::new()))
         } else {
-            Box::new(windows::WindowsFanController::new())
+            Ok(Box::new(windows::WindowsFanController::new()?))
         }
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]

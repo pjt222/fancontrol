@@ -45,7 +45,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Gui => gui::run(),
         other => {
-            let controller = create_controller();
+            let controller = create_controller()?;
             match other {
                 Commands::List => cmd_list(&*controller),
                 Commands::Get { fan_id } => cmd_get(&*controller, &fan_id),
