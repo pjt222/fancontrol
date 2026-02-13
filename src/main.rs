@@ -12,7 +12,7 @@ use std::fs::File;
 use anyhow::Result;
 use clap::Parser;
 use log::info;
-use simplelog::{Config, LevelFilter, WriteLogger};
+use simplelog::{ConfigBuilder, LevelFilter, WriteLogger};
 
 use cli::{Cli, Commands};
 use platform::{create_controller, FanController};
@@ -24,8 +24,9 @@ fn main() -> Result<()> {
         .parent()
         .unwrap_or(std::path::Path::new("."))
         .join("fancontrol.log");
+    let log_config = ConfigBuilder::new().set_time_format_rfc3339().build();
     if let Ok(file) = File::create(&log_path) {
-        let _ = WriteLogger::init(LevelFilter::Debug, Config::default(), file);
+        let _ = WriteLogger::init(LevelFilter::Debug, log_config, file);
     }
     info!("fancontrol started");
 
@@ -123,29 +124,6 @@ fn cmd_table(controller: &dyn FanController, filter_fan_id: Option<u32>) -> Resu
     if filtered.is_empty() {
         println!("No fan curves found for the specified fan ID.");
         return Ok(());
-    }
-
-    // Collect unique fan IDs to query max speed data.
-    let mut displayed_fan_ids: Vec<u32> = filtered.iter().map(|c| c.fan_id).collect();
-    displayed_fan_ids.sort();
-    displayed_fan_ids.dedup();
-
-    // Try to get max speed data for each fan (Lenovo-specific, may fail on other platforms).
-    for &fid in &displayed_fan_ids {
-        match controller.get_max_speed(fid) {
-            Ok(ref bytes) if !bytes.is_empty() => {
-                let fan_label = match fid {
-                    0 => "CPU Fan",
-                    1 => "GPU Fan",
-                    _ => "Fan",
-                };
-                println!(
-                    "Fan {} ({}) \u{2014} EC Max Speed: {:?}",
-                    fid, fan_label, bytes
-                );
-            }
-            _ => {}
-        }
     }
 
     for curve in &filtered {

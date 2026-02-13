@@ -30,14 +30,6 @@ pub trait FanController {
         Ok(false)
     }
 
-    /// Read EC-reported max speed data for a fan (raw bytes).
-    /// Default returns an error indicating the platform does not support it.
-    fn get_max_speed(&self, _fan_id: u32) -> Result<Vec<u8>, FanControlError> {
-        Err(FanControlError::Platform(
-            "max speed query not supported on this platform".to_string(),
-        ))
-    }
-
     /// Read fan curve / table data from the EC. Default returns an error
     /// indicating the platform does not support fan curves.
     fn get_fan_curves(&self) -> Result<Vec<FanCurve>, FanControlError> {

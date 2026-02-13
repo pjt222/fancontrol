@@ -308,35 +308,6 @@ impl FanController for LenovoFanController {
         Ok(())
     }
 
-    fn get_max_speed(&self, fan_id: u32) -> Result<Vec<u8>, FanControlError> {
-        let script = format!(
-            "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
-             $r = $fm.Fan_Get_MaxSpeed({fan_id}); \
-             $size = $r.FanMaxSpeedSize; \
-             Write-Output \"SIZE|$size\"; \
-             if ($r.FanMaxSpeed -ne $null) {{ \
-               Write-Output (\"BYTES|\" + ($r.FanMaxSpeed -join ',')) \
-             }}"
-        );
-        let output = Self::ps_command(&script)?;
-
-        let mut bytes = Vec::new();
-        for line in output.lines() {
-            if let Some(data) = line.strip_prefix("BYTES|") {
-                bytes = data
-                    .split(',')
-                    .filter_map(|s| s.trim().parse::<u8>().ok())
-                    .collect();
-            }
-        }
-        debug!(
-            "Fan_Get_MaxSpeed({fan_id}): {} bytes = {:?}",
-            bytes.len(),
-            bytes
-        );
-        Ok(bytes)
-    }
-
     fn is_full_speed(&self) -> Result<bool, FanControlError> {
         let script = "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
              ($fm.Fan_Get_FullSpeed()).Status";
