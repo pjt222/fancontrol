@@ -44,11 +44,17 @@ pub struct Fan {
     pub max_rpm: Option<u32>,
     /// Fan curves from EC table data (if available).
     pub curves: Vec<FanCurve>,
+    /// Whether full speed mode is currently active (Lenovo-specific).
+    pub full_speed_active: bool,
 }
 
 impl fmt::Display for Fan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let control_status = if self.controllable { "controllable" } else { "read-only" };
+        let control_status = if self.controllable {
+            "controllable"
+        } else {
+            "read-only"
+        };
         write!(
             f,
             "{}: {} RPM [{}]",

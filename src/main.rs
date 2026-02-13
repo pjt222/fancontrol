@@ -53,6 +53,11 @@ fn cmd_list(controller: &dyn FanController) -> Result<()> {
         println!("No fans detected.");
         return Ok(());
     }
+
+    if fans.iter().any(|f| f.full_speed_active) {
+        println!("** FULL SPEED MODE ACTIVE **\n");
+    }
+
     println!(
         "{:<25} {:<20} {:>8} {:>6} STATUS",
         "ID", "LABEL", "RPM", "PWM"
@@ -62,7 +67,7 @@ fn cmd_list(controller: &dyn FanController) -> Result<()> {
         let pwm_display = fan
             .pwm
             .map(|p| format!("{}", p))
-            .unwrap_or_else(|| "—".into());
+            .unwrap_or_else(|| "\u{2014}".into());
         let status = if fan.controllable {
             "controllable"
         } else {
@@ -92,6 +97,11 @@ fn cmd_table(controller: &dyn FanController, filter_fan_id: Option<u32>) -> Resu
     // Prefer curves already attached to fans from discover(), falling back
     // to the dedicated get_fan_curves() method.
     let fans = controller.discover()?;
+
+    if fans.iter().any(|f| f.full_speed_active) {
+        println!("** FULL SPEED MODE ACTIVE **\n");
+    }
+
     let has_embedded_curves = fans.iter().any(|f| !f.curves.is_empty());
 
     let curves = if has_embedded_curves {
@@ -113,6 +123,29 @@ fn cmd_table(controller: &dyn FanController, filter_fan_id: Option<u32>) -> Resu
     if filtered.is_empty() {
         println!("No fan curves found for the specified fan ID.");
         return Ok(());
+    }
+
+    // Collect unique fan IDs to query max speed data.
+    let mut displayed_fan_ids: Vec<u32> = filtered.iter().map(|c| c.fan_id).collect();
+    displayed_fan_ids.sort();
+    displayed_fan_ids.dedup();
+
+    // Try to get max speed data for each fan (Lenovo-specific, may fail on other platforms).
+    for &fid in &displayed_fan_ids {
+        match controller.get_max_speed(fid) {
+            Ok(ref bytes) if !bytes.is_empty() => {
+                let fan_label = match fid {
+                    0 => "CPU Fan",
+                    1 => "GPU Fan",
+                    _ => "Fan",
+                };
+                println!(
+                    "Fan {} ({}) \u{2014} EC Max Speed: {:?}",
+                    fid, fan_label, bytes
+                );
+            }
+            _ => {}
+        }
     }
 
     for curve in &filtered {
@@ -155,6 +188,9 @@ fn cmd_monitor(controller: &dyn FanController, interval_secs: u64) -> Result<()>
         if fans.is_empty() {
             println!("No fans detected.");
         } else {
+            if fans.iter().any(|f| f.full_speed_active) {
+                println!("** FULL SPEED MODE ACTIVE **\n");
+            }
             println!("{:<25} {:>8} {:>6}", "FAN", "RPM", "PWM");
             println!("{}", "-".repeat(45));
             for fan in &fans {

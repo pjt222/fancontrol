@@ -9,9 +9,9 @@
 use serde::Deserialize;
 use wmi::{COMLibrary, WMIConnection};
 
+use super::FanController;
 use crate::errors::FanControlError;
 use crate::fan::Fan;
-use super::FanController;
 
 /// Detect whether this machine is a Lenovo system.
 pub fn is_lenovo() -> bool {
@@ -90,10 +90,9 @@ impl WindowsFanController {
     /// initialised.  In production you may want to propagate these errors
     /// instead.
     pub fn new() -> Self {
-        let com_library = COMLibrary::new()
-            .expect("failed to initialise COM library");
-        let wmi_connection = WMIConnection::new(com_library)
-            .expect("failed to connect to WMI (root\\cimv2)");
+        let com_library = COMLibrary::new().expect("failed to initialise COM library");
+        let wmi_connection =
+            WMIConnection::new(com_library).expect("failed to connect to WMI (root\\cimv2)");
 
         Self { wmi_connection }
     }
@@ -106,9 +105,7 @@ impl WindowsFanController {
             .wmi_connection
             .raw_query("SELECT DeviceID, Name, DesiredSpeed, ActiveCooling FROM Win32_Fan")
             .map_err(|error| {
-                FanControlError::Platform(format!(
-                    "WMI query for Win32_Fan failed: {error}"
-                ))
+                FanControlError::Platform(format!("WMI query for Win32_Fan failed: {error}"))
             })?;
 
         Ok(results)
@@ -128,6 +125,7 @@ impl WindowsFanController {
             min_rpm: None,
             max_rpm: None,
             curves: Vec::new(),
+            full_speed_active: false,
         }
     }
 }
@@ -145,10 +143,7 @@ impl FanController for WindowsFanController {
     fn discover(&self) -> Result<Vec<Fan>, FanControlError> {
         let wmi_fans = self.query_fans()?;
 
-        let fans = wmi_fans
-            .iter()
-            .map(Self::win32_fan_to_fan)
-            .collect();
+        let fans = wmi_fans.iter().map(Self::win32_fan_to_fan).collect();
 
         Ok(fans)
     }
@@ -178,9 +173,7 @@ impl FanController for WindowsFanController {
         // first so the caller gets the most specific error possible.
         let wmi_fans = self.query_fans()?;
 
-        let fan_exists = wmi_fans
-            .iter()
-            .any(|fan| fan.device_id == fan_id);
+        let fan_exists = wmi_fans.iter().any(|fan| fan.device_id == fan_id);
 
         if !fan_exists {
             return Err(FanControlError::FanNotFound(fan_id.to_owned()));

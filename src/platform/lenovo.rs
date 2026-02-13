@@ -9,9 +9,9 @@ use std::process::Command;
 
 use log::{debug, info, warn};
 
+use super::FanController;
 use crate::errors::FanControlError;
 use crate::fan::{Fan, FanCurve, FanCurvePoint};
-use super::FanController;
 
 /// Fallback RPM range used when table data is unavailable.
 const DEFAULT_MIN_RPM: u32 = 1600;
@@ -106,14 +106,18 @@ impl LenovoFanController {
 impl FanController for LenovoFanController {
     fn discover(&self) -> Result<Vec<Fan>, FanControlError> {
         // Single PowerShell invocation: discover fans, read speeds, temps,
-        // and full fan table data (curves + RPM ranges).
+        // full fan table data (curves + RPM ranges), and full speed status.
         //
         // Output format:
+        //   FULLSPEED|0/1
         //   FAN|fan_id|sensor_id|speed|temp          — one per fan (best sensor)
         //   TABLE|fan_id|sensor_id|active|min_speed|max_speed|min_temp|max_temp|speeds_csv|temps_csv
         let script =
             "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
              $tables = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_TABLE_DATA; \
+             $fs = ($fm.Fan_Get_FullSpeed()).Status; \
+             $fsVal = if ($fs) { '1' } else { '0' }; \
+             Write-Output \"FULLSPEED|$fsVal\"; \
              $best = @{}; \
              foreach ($t in $tables) { \
                $fid = $t.Fan_Id; \
@@ -141,6 +145,16 @@ impl FanController for LenovoFanController {
              }";
 
         let output = Self::ps_command(script)?;
+
+        // Parse FULLSPEED line.
+        let mut full_speed_active = false;
+        for line in output.lines() {
+            if let Some(value) = line.strip_prefix("FULLSPEED|") {
+                full_speed_active = value.trim() == "1";
+                debug!("full_speed_active = {full_speed_active}");
+                break;
+            }
+        }
 
         // First pass: parse TABLE lines to build curves and RPM ranges.
         let mut curves_by_fan: HashMap<u32, Vec<FanCurve>> = HashMap::new();
@@ -249,6 +263,7 @@ impl FanController for LenovoFanController {
                 min_rpm: range.map(|r| r.min_rpm),
                 max_rpm: range.map(|r| r.max_rpm),
                 curves,
+                full_speed_active,
             });
         }
 
@@ -265,14 +280,12 @@ impl FanController for LenovoFanController {
 
         if pwm == 255 {
             info!("set_pwm({fan_id}, 255) -> Fan_Set_FullSpeed(1)");
-            let script =
-                "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
+            let script = "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
                  $fm.Fan_Set_FullSpeed(1)";
             Self::ps_command(script)?;
         } else if pwm == 0 {
             info!("set_pwm({fan_id}, 0) -> Fan_Set_FullSpeed(0) [auto]");
-            let script =
-                "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
+            let script = "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
                  $fm.Fan_Set_FullSpeed(0)";
             Self::ps_command(script)?;
         } else {
@@ -289,17 +302,51 @@ impl FanController for LenovoFanController {
     }
 
     fn stop_fan(&self, _fan_id: &str) -> Result<(), FanControlError> {
-        let script =
-            "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
+        let script = "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
              $fm.Fan_Set_FullSpeed(0)";
         Self::ps_command(script)?;
         Ok(())
     }
 
+    fn get_max_speed(&self, fan_id: u32) -> Result<Vec<u8>, FanControlError> {
+        let script = format!(
+            "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
+             $r = $fm.Fan_Get_MaxSpeed({fan_id}); \
+             $size = $r.FanMaxSpeedSize; \
+             Write-Output \"SIZE|$size\"; \
+             if ($r.FanMaxSpeed -ne $null) {{ \
+               Write-Output (\"BYTES|\" + ($r.FanMaxSpeed -join ',')) \
+             }}"
+        );
+        let output = Self::ps_command(&script)?;
+
+        let mut bytes = Vec::new();
+        for line in output.lines() {
+            if let Some(data) = line.strip_prefix("BYTES|") {
+                bytes = data
+                    .split(',')
+                    .filter_map(|s| s.trim().parse::<u8>().ok())
+                    .collect();
+            }
+        }
+        debug!(
+            "Fan_Get_MaxSpeed({fan_id}): {} bytes = {:?}",
+            bytes.len(),
+            bytes
+        );
+        Ok(bytes)
+    }
+
+    fn is_full_speed(&self) -> Result<bool, FanControlError> {
+        let script = "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
+             ($fm.Fan_Get_FullSpeed()).Status";
+        let output = Self::ps_command(script)?;
+        Ok(output.trim().eq_ignore_ascii_case("true"))
+    }
+
     fn get_fan_curves(&self) -> Result<Vec<FanCurve>, FanControlError> {
         // Dedicated query for just the table data (no speed/temp reads).
-        let script =
-            "$tables = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_TABLE_DATA; \
+        let script = "$tables = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_TABLE_DATA; \
              foreach ($t in $tables) { \
                $fid = $t.Fan_Id; \
                $sid = $t.Sensor_ID; \

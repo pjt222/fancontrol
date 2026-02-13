@@ -159,7 +159,8 @@ impl FanControlApp {
                 WorkerResponse::FanData(fans) => {
                     for fan in &fans {
                         if let Some(pwm) = fan.pwm {
-                            self.slider_values.entry(fan.id.clone())
+                            self.slider_values
+                                .entry(fan.id.clone())
                                 .or_insert(pwm as f32);
                         }
                     }
@@ -207,6 +208,18 @@ impl eframe::App for FanControlApp {
                 if self.fans.is_empty() {
                     ui.label("No fans detected.");
                     return;
+                }
+
+                // Full speed mode banner.
+                if self.fans.iter().any(|f| f.full_speed_active) {
+                    egui::Frame::none()
+                        .fill(egui::Color32::from_rgb(180, 40, 40))
+                        .inner_margin(8.0)
+                        .rounding(4.0)
+                        .show(ui, |ui| {
+                            ui.colored_label(egui::Color32::WHITE, "FULL SPEED MODE ACTIVE");
+                        });
+                    ui.add_space(4.0);
                 }
 
                 let fans: Vec<Fan> = self.fans.clone();
@@ -261,27 +274,37 @@ impl eframe::App for FanControlApp {
                                     .default_open(false)
                                     .show(ui, |ui| {
                                         for curve in curves {
-                                            let active_tag = if curve.active { "Active" } else { "Inactive" };
+                                            let active_tag =
+                                                if curve.active { "Active" } else { "Inactive" };
                                             ui.label(format!(
                                                 "Sensor {} [{}] \u{2014} {}\u{2013}{}\u{00B0}C",
-                                                curve.sensor_id, active_tag,
-                                                curve.min_temp, curve.max_temp
+                                                curve.sensor_id,
+                                                active_tag,
+                                                curve.min_temp,
+                                                curve.max_temp
                                             ));
 
                                             egui::Grid::new(format!(
-                                                "curve_{}_{}", curve.fan_id, curve.sensor_id
+                                                "curve_{}_{}",
+                                                curve.fan_id, curve.sensor_id
                                             ))
                                             .striped(true)
-                                            .show(ui, |ui| {
-                                                ui.strong("Temp");
-                                                ui.strong("RPM");
-                                                ui.end_row();
-                                                for point in &curve.points {
-                                                    ui.label(format!("{}\u{00B0}C", point.temperature));
-                                                    ui.label(format!("{}", point.fan_speed));
+                                            .show(
+                                                ui,
+                                                |ui| {
+                                                    ui.strong("Temp");
+                                                    ui.strong("RPM");
                                                     ui.end_row();
-                                                }
-                                            });
+                                                    for point in &curve.points {
+                                                        ui.label(format!(
+                                                            "{}\u{00B0}C",
+                                                            point.temperature
+                                                        ));
+                                                        ui.label(format!("{}", point.fan_speed));
+                                                        ui.end_row();
+                                                    }
+                                                },
+                                            );
 
                                             ui.add_space(4.0);
                                         }

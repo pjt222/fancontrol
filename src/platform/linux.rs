@@ -2,9 +2,9 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+use super::FanController;
 use crate::errors::FanControlError;
 use crate::fan::Fan;
-use super::FanController;
 
 const HWMON_BASE: &str = "/sys/class/hwmon";
 
@@ -142,10 +142,7 @@ impl FanController for LinuxFanController {
 // ---------------------------------------------------------------------------
 
 /// Discover all fans under a single hwmon directory.
-fn discover_fans_in_hwmon(
-    hwmon_dir: &Path,
-    hwmon_name: &str,
-) -> Result<Vec<Fan>, FanControlError> {
+fn discover_fans_in_hwmon(hwmon_dir: &Path, hwmon_name: &str) -> Result<Vec<Fan>, FanControlError> {
     let mut fans = Vec::new();
 
     let entries = match fs::read_dir(hwmon_dir) {
@@ -189,6 +186,7 @@ fn discover_fans_in_hwmon(
             min_rpm: None,
             max_rpm: None,
             curves: Vec::new(),
+            full_speed_active: false,
         });
     }
 
@@ -235,17 +233,14 @@ fn read_pwm_state(hwmon_dir: &Path, fan_index: &str) -> (bool, Option<u8>) {
 /// Read a sysfs file and parse its content as a `u32`.
 fn read_sysfs_u32(path: &Path) -> Result<u32, FanControlError> {
     let content = fs::read_to_string(path).map_err(|error| map_io_error(error, path))?;
-    content
-        .trim()
-        .parse::<u32>()
-        .map_err(|parse_error| {
-            FanControlError::Platform(format!(
-                "failed to parse '{}' from {}: {}",
-                content.trim(),
-                path.display(),
-                parse_error
-            ))
-        })
+    content.trim().parse::<u32>().map_err(|parse_error| {
+        FanControlError::Platform(format!(
+            "failed to parse '{}' from {}: {}",
+            content.trim(),
+            path.display(),
+            parse_error
+        ))
+    })
 }
 
 /// Write a string value to a sysfs file.

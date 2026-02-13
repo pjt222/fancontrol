@@ -1,7 +1,7 @@
-#[cfg(target_os = "linux")]
-mod linux;
 #[cfg(target_os = "windows")]
 mod lenovo;
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(target_os = "windows")]
 mod windows;
 
@@ -23,6 +23,19 @@ pub trait FanController {
     /// platforms where PWM 0 means something else (e.g. Lenovo auto mode).
     fn stop_fan(&self, fan_id: &str) -> Result<(), FanControlError> {
         self.set_pwm(fan_id, 0)
+    }
+
+    /// Check whether full speed mode is active. Default returns false.
+    fn is_full_speed(&self) -> Result<bool, FanControlError> {
+        Ok(false)
+    }
+
+    /// Read EC-reported max speed data for a fan (raw bytes).
+    /// Default returns an error indicating the platform does not support it.
+    fn get_max_speed(&self, _fan_id: u32) -> Result<Vec<u8>, FanControlError> {
+        Err(FanControlError::Platform(
+            "max speed query not supported on this platform".to_string(),
+        ))
     }
 
     /// Read fan curve / table data from the EC. Default returns an error
