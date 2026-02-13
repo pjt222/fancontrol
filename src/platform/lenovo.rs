@@ -502,7 +502,10 @@ mod tests {
         let rpm = pwm_to_rpm(1600, 4800, original_pwm);
         let recovered_pwm = rpm_to_pwm(1600, 4800, rpm);
         let diff = (original_pwm as i16 - recovered_pwm as i16).unsigned_abs();
-        assert!(diff <= 1, "original={original_pwm} recovered={recovered_pwm}");
+        assert!(
+            diff <= 1,
+            "original={original_pwm} recovered={recovered_pwm}"
+        );
     }
 
     // -- parse_fullspeed ----------------------------------------------------
@@ -654,9 +657,7 @@ FAN|1|4|0|31";
             if !line.starts_with("FAN|") {
                 continue;
             }
-            if let Some(fan) =
-                parse_fan_line(line, &rpm_ranges, &mut curves_by_fan, full_speed)
-            {
+            if let Some(fan) = parse_fan_line(line, &rpm_ranges, &mut curves_by_fan, full_speed) {
                 fans.push(fan);
             }
         }
