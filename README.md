@@ -18,26 +18,26 @@ Generated with [putior](https://github.com/pjt222/putior) from `// put` annotati
 
 ```mermaid
 flowchart TD
-    cli_def["CLI Definition (clap)"<br/><small>(cli.rs)</small>]
-    fan_structs["Fan/FanCurve Data Structs"<br/><small>(fan.rs)</small>]
-    gui_init["Launch GUI + Worker Thread"<br/><small>(gui.rs)</small>]
-    worker_loop["Worker Poll Loop (1.5s)"<br/><small>(gui.rs)</small>]
-    worker_refresh["Re-apply held_pwm + Discover"<br/><small>(gui.rs)</small>]
-    ui_render["Render Fan Cards"<br/><small>(gui.rs)</small>]
-    ui_set_pwm["User Sets PWM"<br/><small>(gui.rs)</small>]
-    cli_parse["Parse CLI Arguments"<br/><small>(main.rs)</small>]
-    setup_logging["Setup File Logger"<br/><small>(main.rs)</small>]
-    create_ctrl["Create Platform Controller"<br/><small>(main.rs)</small>]
-    dispatch["Dispatch CLI Command"<br/><small>(main.rs)</small>]
-    lenovo_discover["Lenovo Discovery (PowerShell)"<br/><small>(lenovo.rs)</small>]
-    lenovo_ps["PowerShell WMI Subprocess"<br/><small>(lenovo.rs)</small>]
-    lenovo_parse["Parse TABLE|FAN|FULLSPEED"<br/><small>(lenovo.rs)</small>]
-    lenovo_set["Set Fan Speed (WMI)"<br/><small>(lenovo.rs)</small>]
-    linux_discover["Scan sysfs/hwmon"<br/><small>(linux.rs)</small>]
-    linux_read["Read Fan Speed"<br/><small>(linux.rs)</small>]
-    linux_write["Write PWM Value"<br/><small>(linux.rs)</small>]
-    platform_select{"Platform Detection"<br/><small>(mod.rs)</small>}
-    win_wmi["Query Win32_Fan (WMI)"<br/><small>(windows.rs)</small>]
+    cli_def["CLI Definition - clap<br/>cli.rs"]
+    fan_structs[("Fan/FanCurve Data Structs<br/>fan.rs")]
+    gui_init["Launch GUI + Worker Thread<br/>gui.rs"]
+    worker_loop["Worker Poll Loop 1.5s<br/>gui.rs"]
+    worker_refresh["Re-apply held_pwm + Discover<br/>gui.rs"]
+    ui_render["Render Fan Cards<br/>gui.rs"]
+    ui_set_pwm["User Sets PWM<br/>gui.rs"]
+    cli_parse["Parse CLI Arguments<br/>main.rs"]
+    setup_logging["Setup File Logger<br/>main.rs"]
+    create_ctrl["Create Platform Controller<br/>main.rs"]
+    dispatch["Dispatch CLI Command<br/>main.rs"]
+    lenovo_discover["Lenovo Discovery - PowerShell<br/>lenovo.rs"]
+    lenovo_ps(["PowerShell WMI Subprocess<br/>lenovo.rs"])
+    lenovo_parse["Parse TABLE/FAN/FULLSPEED<br/>lenovo.rs"]
+    lenovo_set["Set Fan Speed - WMI<br/>lenovo.rs"]
+    linux_discover["Scan sysfs/hwmon<br/>linux.rs"]
+    linux_read["Read Fan Speed<br/>linux.rs"]
+    linux_write["Write PWM Value<br/>linux.rs"]
+    platform_select{"Platform Detection<br/>mod.rs"}
+    win_wmi["Query Win32_Fan - WMI<br/>windows.rs"]
 
     %% Connections
     gui_init --> worker_loop
