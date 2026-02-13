@@ -37,6 +37,13 @@ pub enum Commands {
         interval: u64,
     },
 
+    /// Display EC fan curve / table data
+    Table {
+        /// Show curves for a specific fan ID only (e.g. 0, 1)
+        #[arg(long)]
+        fan_id: Option<u32>,
+    },
+
     /// Open the graphical fan control interface
     Gui,
 }

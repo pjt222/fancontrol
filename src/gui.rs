@@ -12,11 +12,11 @@ use std::time::Duration;
 use eframe::egui;
 use log::{debug, info, warn};
 
-use crate::fan::Fan;
+use crate::fan::{Fan, FanCurve};
 use crate::platform::create_controller;
 
 // ---------------------------------------------------------------------------
-// Worker ↔ UI protocol
+// Worker <-> UI protocol
 // ---------------------------------------------------------------------------
 
 enum WorkerCommand {
@@ -26,6 +26,7 @@ enum WorkerCommand {
 
 enum WorkerResponse {
     FanData(Vec<Fan>),
+    CurveData(HashMap<String, Vec<FanCurve>>),
     PwmSet { fan_id: String, pwm: u8 },
     Error(String),
 }
@@ -45,10 +46,25 @@ fn spawn_worker(
         // cycle so Fn+Q or other BIOS overrides don't stick.
         let mut held_pwm: HashMap<String, u8> = HashMap::new();
 
-        // Initial discovery.
+        // Initial discovery — includes curve data on first call.
         match controller.discover() {
-            Ok(fans) => { let _ = response_tx.send(WorkerResponse::FanData(fans)); }
-            Err(error) => { let _ = response_tx.send(WorkerResponse::Error(error.to_string())); }
+            Ok(ref fans) => {
+                // Extract curve data from the first discovery and send
+                // separately so the UI can cache it without re-querying.
+                let mut curves_map: HashMap<String, Vec<FanCurve>> = HashMap::new();
+                for fan in fans {
+                    if !fan.curves.is_empty() {
+                        curves_map.insert(fan.id.clone(), fan.curves.clone());
+                    }
+                }
+                if !curves_map.is_empty() {
+                    let _ = response_tx.send(WorkerResponse::CurveData(curves_map));
+                }
+                let _ = response_tx.send(WorkerResponse::FanData(fans.clone()));
+            }
+            Err(error) => {
+                let _ = response_tx.send(WorkerResponse::Error(error.to_string()));
+            }
         }
         repaint_ctx.request_repaint();
 
@@ -115,6 +131,8 @@ fn spawn_worker(
 struct FanControlApp {
     fans: Vec<Fan>,
     slider_values: HashMap<String, f32>,
+    /// Curve data per fan, sent once at startup.
+    fan_curves: HashMap<String, Vec<FanCurve>>,
     status_message: String,
     command_tx: mpsc::Sender<WorkerCommand>,
     response_rx: mpsc::Receiver<WorkerResponse>,
@@ -128,6 +146,7 @@ impl FanControlApp {
         Self {
             fans: Vec::new(),
             slider_values: HashMap::new(),
+            fan_curves: HashMap::new(),
             status_message: "Discovering fans...".into(),
             command_tx,
             response_rx,
@@ -146,6 +165,9 @@ impl FanControlApp {
                     }
                     self.fans = fans;
                     self.status_message = "OK".into();
+                }
+                WorkerResponse::CurveData(curves) => {
+                    self.fan_curves = curves;
                 }
                 WorkerResponse::PwmSet { fan_id, pwm } => {
                     self.status_message = format!("Set {} PWM to {}", fan_id, pwm);
@@ -195,6 +217,11 @@ impl eframe::App for FanControlApp {
 
                         ui.strong(&fan.label);
 
+                        // RPM range from table data.
+                        if let (Some(min_rpm), Some(max_rpm)) = (fan.min_rpm, fan.max_rpm) {
+                            ui.label(format!("Range: {}\u{2013}{} RPM", min_rpm, max_rpm));
+                        }
+
                         // Actual readback from hardware.
                         ui.horizontal(|ui| {
                             ui.label("Now:");
@@ -225,6 +252,42 @@ impl eframe::App for FanControlApp {
                         } else {
                             ui.label("read-only");
                         }
+
+                        // Collapsible fan curve section.
+                        if let Some(curves) = self.fan_curves.get(&fan.id) {
+                            if !curves.is_empty() {
+                                ui.add_space(4.0);
+                                egui::CollapsingHeader::new("Fan Curve")
+                                    .default_open(false)
+                                    .show(ui, |ui| {
+                                        for curve in curves {
+                                            let active_tag = if curve.active { "Active" } else { "Inactive" };
+                                            ui.label(format!(
+                                                "Sensor {} [{}] \u{2014} {}\u{2013}{}\u{00B0}C",
+                                                curve.sensor_id, active_tag,
+                                                curve.min_temp, curve.max_temp
+                                            ));
+
+                                            egui::Grid::new(format!(
+                                                "curve_{}_{}", curve.fan_id, curve.sensor_id
+                                            ))
+                                            .striped(true)
+                                            .show(ui, |ui| {
+                                                ui.strong("Temp");
+                                                ui.strong("RPM");
+                                                ui.end_row();
+                                                for point in &curve.points {
+                                                    ui.label(format!("{}\u{00B0}C", point.temperature));
+                                                    ui.label(format!("{}", point.fan_speed));
+                                                    ui.end_row();
+                                                }
+                                            });
+
+                                            ui.add_space(4.0);
+                                        }
+                                    });
+                            }
+                        }
                     });
 
                     ui.add_space(4.0);
@@ -241,7 +304,7 @@ impl eframe::App for FanControlApp {
 pub fn run() -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([400.0, 500.0])
+            .with_inner_size([400.0, 600.0])
             .with_min_inner_size([300.0, 300.0]),
         ..Default::default()
     };

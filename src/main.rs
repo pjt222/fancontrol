@@ -40,6 +40,7 @@ fn main() -> Result<()> {
                 Commands::Get { fan_id } => cmd_get(&*controller, &fan_id),
                 Commands::Set { fan_id, pwm } => cmd_set(&*controller, &fan_id, pwm),
                 Commands::Monitor { interval } => cmd_monitor(&*controller, interval),
+                Commands::Table { fan_id } => cmd_table(&*controller, fan_id),
                 Commands::Gui => unreachable!(),
             }
         }
@@ -84,6 +85,62 @@ fn cmd_get(controller: &dyn FanController, fan_id: &str) -> Result<()> {
 fn cmd_set(controller: &dyn FanController, fan_id: &str, pwm: u8) -> Result<()> {
     controller.set_pwm(fan_id, pwm)?;
     println!("Set {} PWM to {}", fan_id, pwm);
+    Ok(())
+}
+
+fn cmd_table(controller: &dyn FanController, filter_fan_id: Option<u32>) -> Result<()> {
+    // Prefer curves already attached to fans from discover(), falling back
+    // to the dedicated get_fan_curves() method.
+    let fans = controller.discover()?;
+    let has_embedded_curves = fans.iter().any(|f| !f.curves.is_empty());
+
+    let curves = if has_embedded_curves {
+        fans.into_iter().flat_map(|f| f.curves).collect::<Vec<_>>()
+    } else {
+        controller.get_fan_curves()?
+    };
+
+    if curves.is_empty() {
+        println!("No fan curve data available on this platform.");
+        return Ok(());
+    }
+
+    let filtered: Vec<_> = match filter_fan_id {
+        Some(fid) => curves.into_iter().filter(|c| c.fan_id == fid).collect(),
+        None => curves,
+    };
+
+    if filtered.is_empty() {
+        println!("No fan curves found for the specified fan ID.");
+        return Ok(());
+    }
+
+    for curve in &filtered {
+        let fan_label = match curve.fan_id {
+            0 => "CPU Fan",
+            1 => "GPU Fan",
+            _ => "Fan",
+        };
+        let active_tag = if curve.active { "Active" } else { "Inactive" };
+        println!(
+            "Fan {} ({}) \u{2014} Sensor {} [{}]",
+            curve.fan_id, fan_label, curve.sensor_id, active_tag
+        );
+        println!(
+            "  Speed: {}\u{2013}{} RPM | Temp: {}\u{2013}{}\u{00B0}C",
+            curve.min_speed, curve.max_speed, curve.min_temp, curve.max_temp
+        );
+        for point in &curve.points {
+            println!(
+                "  {}{}\u{00B0}C \u{2192} {} RPM",
+                if point.temperature < 100 { " " } else { "" },
+                point.temperature,
+                point.fan_speed
+            );
+        }
+        println!();
+    }
+
     Ok(())
 }
 

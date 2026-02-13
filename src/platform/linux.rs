@@ -186,6 +186,9 @@ fn discover_fans_in_hwmon(
             speed_rpm,
             pwm: current_pwm,
             controllable,
+            min_rpm: None,
+            max_rpm: None,
+            curves: Vec::new(),
         });
     }
 

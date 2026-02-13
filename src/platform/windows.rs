@@ -125,6 +125,9 @@ impl WindowsFanController {
             speed_rpm,
             pwm: None, // WMI does not expose a PWM duty-cycle value
             controllable: is_controllable,
+            min_rpm: None,
+            max_rpm: None,
+            curves: Vec::new(),
         }
     }
 }

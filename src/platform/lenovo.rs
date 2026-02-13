@@ -4,24 +4,37 @@
 //! namespace. WMI method calls are performed via PowerShell subprocess since
 //! the `wmi` crate only supports queries, not method invocation.
 
+use std::collections::HashMap;
 use std::process::Command;
 
 use log::{debug, info, warn};
 
 use crate::errors::FanControlError;
-use crate::fan::Fan;
+use crate::fan::{Fan, FanCurve, FanCurvePoint};
 use super::FanController;
 
-/// Fan speed range reported by LENOVO_FAN_TABLE_DATA.
-const MIN_RPM: u32 = 1600;
-const MAX_RPM: u32 = 4800;
+/// Fallback RPM range used when table data is unavailable.
+const DEFAULT_MIN_RPM: u32 = 1600;
+const DEFAULT_MAX_RPM: u32 = 4800;
+
+/// Per-fan RPM range learned from table data.
+#[derive(Debug, Clone)]
+struct FanRpmRange {
+    min_rpm: u32,
+    max_rpm: u32,
+}
 
 /// Lenovo Legion fan controller backed by vendor-specific WMI classes.
-pub struct LenovoFanController;
+pub struct LenovoFanController {
+    /// Per-fan RPM ranges, populated on first discover().
+    fan_ranges: std::cell::RefCell<HashMap<u32, FanRpmRange>>,
+}
 
 impl LenovoFanController {
     pub fn new() -> Self {
-        Self
+        Self {
+            fan_ranges: std::cell::RefCell::new(HashMap::new()),
+        }
     }
 
     /// Call a WMI method via PowerShell and return the raw stdout.
@@ -61,18 +74,43 @@ impl LenovoFanController {
             .map_err(|e| FanControlError::Platform(format!("failed to parse fan speed: {e}")))
     }
 
-    /// Map PWM (0–255) to RPM within the fan's operating range.
-    fn pwm_to_rpm(pwm: u8) -> u32 {
+    /// Map PWM (0-255) to RPM using per-fan range, falling back to defaults.
+    fn pwm_to_rpm(&self, fan_numeric_id: u32, pwm: u8) -> u32 {
+        let ranges = self.fan_ranges.borrow();
+        let (min_rpm, max_rpm) = match ranges.get(&fan_numeric_id) {
+            Some(range) => (range.min_rpm, range.max_rpm),
+            None => (DEFAULT_MIN_RPM, DEFAULT_MAX_RPM),
+        };
         let ratio = pwm as f64 / 255.0;
-        MIN_RPM + (ratio * (MAX_RPM - MIN_RPM) as f64) as u32
+        min_rpm + (ratio * (max_rpm - min_rpm) as f64) as u32
+    }
+
+    /// Map RPM back to approximate PWM (0-255) using per-fan range.
+    fn rpm_to_pwm(&self, fan_numeric_id: u32, rpm: u32) -> u8 {
+        let ranges = self.fan_ranges.borrow();
+        let (min_rpm, max_rpm) = match ranges.get(&fan_numeric_id) {
+            Some(range) => (range.min_rpm, range.max_rpm),
+            None => (DEFAULT_MIN_RPM, DEFAULT_MAX_RPM),
+        };
+        if rpm <= min_rpm {
+            return 0;
+        }
+        if rpm >= max_rpm {
+            return 255;
+        }
+        let ratio = (rpm - min_rpm) as f64 / (max_rpm - min_rpm) as f64;
+        (ratio * 255.0) as u8
     }
 }
 
 impl FanController for LenovoFanController {
     fn discover(&self) -> Result<Vec<Fan>, FanControlError> {
-        // Single PowerShell invocation: discover fans, read speeds and temps.
-        // Group by Fan_Id taking the highest Sensor_ID per fan (the one
-        // that actually returns temperature data on this hardware).
+        // Single PowerShell invocation: discover fans, read speeds, temps,
+        // and full fan table data (curves + RPM ranges).
+        //
+        // Output format:
+        //   FAN|fan_id|sensor_id|speed|temp          — one per fan (best sensor)
+        //   TABLE|fan_id|sensor_id|active|min_speed|max_speed|min_temp|max_temp|speeds_csv|temps_csv
         let script =
             "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
              $tables = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_TABLE_DATA; \
@@ -83,25 +121,115 @@ impl FanController for LenovoFanController {
                  $best[$fid] = $t.Sensor_ID \
                } \
              }; \
+             foreach ($t in $tables) { \
+               $fid = $t.Fan_Id; \
+               $sid = $t.Sensor_ID; \
+               $active = if ($t.Active) { '1' } else { '0' }; \
+               $speeds = ($t.FanTable_Data -join ','); \
+               $temps = ($t.SensorTable_Data -join ','); \
+               $minSpd = ($t.FanTable_Data | Measure-Object -Minimum).Minimum; \
+               $maxSpd = ($t.FanTable_Data | Measure-Object -Maximum).Maximum; \
+               $minTmp = ($t.SensorTable_Data | Measure-Object -Minimum).Minimum; \
+               $maxTmp = ($t.SensorTable_Data | Measure-Object -Maximum).Maximum; \
+               Write-Output \"TABLE|$fid|$sid|$active|$minSpd|$maxSpd|$minTmp|$maxTmp|$speeds|$temps\" \
+             }; \
              foreach ($fid in ($best.Keys | Sort-Object)) { \
                $sid = $best[$fid]; \
                $speed = ($fm.Fan_GetCurrentFanSpeed($fid)).CurrentFanSpeed; \
                $temp = ($fm.Fan_GetCurrentSensorTemperature($sid)).CurrentSensorTemperature; \
-               Write-Output \"$fid|$sid|$speed|$temp\" \
+               Write-Output \"FAN|$fid|$sid|$speed|$temp\" \
              }";
 
         let output = Self::ps_command(script)?;
 
-        let mut fans = Vec::new();
+        // First pass: parse TABLE lines to build curves and RPM ranges.
+        let mut curves_by_fan: HashMap<u32, Vec<FanCurve>> = HashMap::new();
+        // Track overall min/max RPM per fan across all its sensor curves.
+        let mut rpm_ranges: HashMap<u32, FanRpmRange> = HashMap::new();
+
         for line in output.lines() {
+            if !line.starts_with("TABLE|") {
+                continue;
+            }
             let parts: Vec<&str> = line.split('|').collect();
-            if parts.len() < 4 {
+            if parts.len() < 10 {
+                warn!("TABLE line too short: {line}");
                 continue;
             }
 
-            let fan_id: u32 = parts[0].trim().parse().unwrap_or(0);
-            let speed_rpm: u32 = parts[2].trim().parse().unwrap_or(0);
-            let temp: u32 = parts[3].trim().parse().unwrap_or(0);
+            let fan_id: u32 = parts[1].trim().parse().unwrap_or(0);
+            let sensor_id: u32 = parts[2].trim().parse().unwrap_or(0);
+            let active = parts[3].trim() == "1";
+            let min_speed: u32 = parts[4].trim().parse().unwrap_or(0);
+            let max_speed: u32 = parts[5].trim().parse().unwrap_or(0);
+            let min_temp: u32 = parts[6].trim().parse().unwrap_or(0);
+            let max_temp: u32 = parts[7].trim().parse().unwrap_or(0);
+
+            let speeds: Vec<u32> = parts[8]
+                .split(',')
+                .filter_map(|s| s.trim().parse().ok())
+                .collect();
+            let temps: Vec<u32> = parts[9]
+                .split(',')
+                .filter_map(|s| s.trim().parse().ok())
+                .collect();
+
+            let point_count = speeds.len().min(temps.len());
+            let points: Vec<FanCurvePoint> = (0..point_count)
+                .map(|i| FanCurvePoint {
+                    temperature: temps[i],
+                    fan_speed: speeds[i],
+                })
+                .collect();
+
+            debug!(
+                "TABLE: fan={fan_id} sensor={sensor_id} active={active} \
+                 speed={min_speed}-{max_speed} temp={min_temp}-{max_temp} points={point_count}"
+            );
+
+            let curve = FanCurve {
+                fan_id,
+                sensor_id,
+                min_speed,
+                max_speed,
+                min_temp,
+                max_temp,
+                points,
+                active,
+            };
+
+            curves_by_fan.entry(fan_id).or_default().push(curve);
+
+            // Update per-fan RPM range (take the widest range across curves).
+            let range = rpm_ranges.entry(fan_id).or_insert(FanRpmRange {
+                min_rpm: min_speed,
+                max_rpm: max_speed,
+            });
+            if min_speed < range.min_rpm {
+                range.min_rpm = min_speed;
+            }
+            if max_speed > range.max_rpm {
+                range.max_rpm = max_speed;
+            }
+        }
+
+        // Store learned RPM ranges for pwm_to_rpm/rpm_to_pwm.
+        *self.fan_ranges.borrow_mut() = rpm_ranges.clone();
+
+        // Second pass: parse FAN lines to build Fan structs.
+        let mut fans = Vec::new();
+        for line in output.lines() {
+            if !line.starts_with("FAN|") {
+                continue;
+            }
+            let parts: Vec<&str> = line.split('|').collect();
+            if parts.len() < 5 {
+                continue;
+            }
+
+            let fan_id: u32 = parts[1].trim().parse().unwrap_or(0);
+            let speed_rpm: u32 = parts[3].trim().parse().unwrap_or(0);
+            let temp: u32 = parts[4].trim().parse().unwrap_or(0);
 
             let label = match fan_id {
                 0 => "CPU Fan".to_string(),
@@ -109,12 +237,18 @@ impl FanController for LenovoFanController {
                 n => format!("Fan {n}"),
             };
 
+            let range = rpm_ranges.get(&fan_id);
+            let curves = curves_by_fan.remove(&fan_id).unwrap_or_default();
+
             fans.push(Fan {
                 id: format!("fan{fan_id}"),
-                label: format!("{label} ({temp}°C)"),
+                label: format!("{label} ({temp}\u{00B0}C)"),
                 speed_rpm,
-                pwm: Some(rpm_to_pwm(speed_rpm)),
+                pwm: Some(self.rpm_to_pwm(fan_id, speed_rpm)),
                 controllable: true,
+                min_rpm: range.map(|r| r.min_rpm),
+                max_rpm: range.map(|r| r.max_rpm),
+                curves,
             });
         }
 
@@ -142,7 +276,7 @@ impl FanController for LenovoFanController {
                  $fm.Fan_Set_FullSpeed(0)";
             Self::ps_command(script)?;
         } else {
-            let target_rpm = Self::pwm_to_rpm(pwm);
+            let target_rpm = self.pwm_to_rpm(numeric_id, pwm);
             info!("set_pwm({fan_id}, {pwm}) -> Fan_SetCurrentFanSpeed({numeric_id}, {target_rpm})");
             let script = format!(
                 "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
@@ -155,13 +289,77 @@ impl FanController for LenovoFanController {
     }
 
     fn stop_fan(&self, _fan_id: &str) -> Result<(), FanControlError> {
-        // Release to BIOS auto control — same WMI call that previously
-        // achieved 0 RPM when invoked via set_pwm(0) from the slider.
         let script =
             "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
              $fm.Fan_Set_FullSpeed(0)";
         Self::ps_command(script)?;
         Ok(())
+    }
+
+    fn get_fan_curves(&self) -> Result<Vec<FanCurve>, FanControlError> {
+        // Dedicated query for just the table data (no speed/temp reads).
+        let script =
+            "$tables = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_TABLE_DATA; \
+             foreach ($t in $tables) { \
+               $fid = $t.Fan_Id; \
+               $sid = $t.Sensor_ID; \
+               $active = if ($t.Active) { '1' } else { '0' }; \
+               $speeds = ($t.FanTable_Data -join ','); \
+               $temps = ($t.SensorTable_Data -join ','); \
+               $minSpd = ($t.FanTable_Data | Measure-Object -Minimum).Minimum; \
+               $maxSpd = ($t.FanTable_Data | Measure-Object -Maximum).Maximum; \
+               $minTmp = ($t.SensorTable_Data | Measure-Object -Minimum).Minimum; \
+               $maxTmp = ($t.SensorTable_Data | Measure-Object -Maximum).Maximum; \
+               Write-Output \"$fid|$sid|$active|$minSpd|$maxSpd|$minTmp|$maxTmp|$speeds|$temps\" \
+             }";
+
+        let output = Self::ps_command(script)?;
+        let mut curves = Vec::new();
+
+        for line in output.lines() {
+            let parts: Vec<&str> = line.split('|').collect();
+            if parts.len() < 9 {
+                continue;
+            }
+
+            let fan_id: u32 = parts[0].trim().parse().unwrap_or(0);
+            let sensor_id: u32 = parts[1].trim().parse().unwrap_or(0);
+            let active = parts[2].trim() == "1";
+            let min_speed: u32 = parts[3].trim().parse().unwrap_or(0);
+            let max_speed: u32 = parts[4].trim().parse().unwrap_or(0);
+            let min_temp: u32 = parts[5].trim().parse().unwrap_or(0);
+            let max_temp: u32 = parts[6].trim().parse().unwrap_or(0);
+
+            let speeds: Vec<u32> = parts[7]
+                .split(',')
+                .filter_map(|s| s.trim().parse().ok())
+                .collect();
+            let temps: Vec<u32> = parts[8]
+                .split(',')
+                .filter_map(|s| s.trim().parse().ok())
+                .collect();
+
+            let point_count = speeds.len().min(temps.len());
+            let points: Vec<FanCurvePoint> = (0..point_count)
+                .map(|i| FanCurvePoint {
+                    temperature: temps[i],
+                    fan_speed: speeds[i],
+                })
+                .collect();
+
+            curves.push(FanCurve {
+                fan_id,
+                sensor_id,
+                min_speed,
+                max_speed,
+                min_temp,
+                max_temp,
+                points,
+                active,
+            });
+        }
+
+        Ok(curves)
     }
 }
 
@@ -171,16 +369,4 @@ fn parse_fan_id(fan_id: &str) -> Result<u32, FanControlError> {
         .strip_prefix("fan")
         .and_then(|n| n.parse::<u32>().ok())
         .ok_or_else(|| FanControlError::FanNotFound(fan_id.to_string()))
-}
-
-/// Map RPM back to approximate PWM (0–255) for display.
-fn rpm_to_pwm(rpm: u32) -> u8 {
-    if rpm <= MIN_RPM {
-        return 0;
-    }
-    if rpm >= MAX_RPM {
-        return 255;
-    }
-    let ratio = (rpm - MIN_RPM) as f64 / (MAX_RPM - MIN_RPM) as f64;
-    (ratio * 255.0) as u8
 }

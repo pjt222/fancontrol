@@ -6,7 +6,7 @@ mod lenovo;
 mod windows;
 
 use crate::errors::FanControlError;
-use crate::fan::Fan;
+use crate::fan::{Fan, FanCurve};
 
 /// Platform-agnostic fan controller interface.
 pub trait FanController {
@@ -23,6 +23,14 @@ pub trait FanController {
     /// platforms where PWM 0 means something else (e.g. Lenovo auto mode).
     fn stop_fan(&self, fan_id: &str) -> Result<(), FanControlError> {
         self.set_pwm(fan_id, 0)
+    }
+
+    /// Read fan curve / table data from the EC. Default returns an error
+    /// indicating the platform does not support fan curves.
+    fn get_fan_curves(&self) -> Result<Vec<FanCurve>, FanControlError> {
+        Err(FanControlError::Platform(
+            "fan curves not supported on this platform".to_string(),
+        ))
     }
 }
 
