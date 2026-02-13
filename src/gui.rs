@@ -1,3 +1,9 @@
+// put id:"gui_init", label:"Launch GUI + Worker Thread", output:"command_channel.internal, response_channel.internal"
+// put id:"worker_loop", label:"Worker Poll Loop (1.5s)", input:"command_channel.internal", output:"response_channel.internal"
+// put id:"worker_refresh", label:"Re-apply held_pwm + Discover", input:"held_pwm.internal", output:"fan_data.internal"
+// put id:"ui_render", label:"Render Fan Cards", input:"response_channel.internal"
+// put id:"ui_set_pwm", label:"User Sets PWM", output:"command_channel.internal, held_pwm.internal"
+
 //! Graphical fan control interface using egui/eframe.
 //!
 //! The controller lives on a dedicated worker thread (required because WMI COM

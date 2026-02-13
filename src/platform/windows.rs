@@ -1,3 +1,5 @@
+// put id:"win_wmi", label:"Query Win32_Fan (WMI)", output:"fan_list.internal"
+
 //! Windows fan controller backend using WMI (Win32_Fan).
 //!
 //! This module queries the `Win32_Fan` WMI class under `root\cimv2` to

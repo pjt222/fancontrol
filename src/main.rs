@@ -17,6 +17,11 @@ use simplelog::{ConfigBuilder, LevelFilter, WriteLogger};
 use cli::{Cli, Commands};
 use platform::{create_controller, FanController};
 
+// put id:"cli_parse", label:"Parse CLI Arguments", output:"cli_command.internal"
+// put id:"setup_logging", label:"Setup File Logger", output:"fancontrol.log"
+// put id:"create_ctrl", label:"Create Platform Controller", input:"cli_command.internal", output:"controller.internal"
+// put id:"dispatch", label:"Dispatch CLI Command", input:"cli_command.internal, controller.internal"
+
 fn level_from_verbosity(verbosity: u8) -> LevelFilter {
     match verbosity {
         0 => LevelFilter::Warn,

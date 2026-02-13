@@ -28,6 +28,8 @@ pub trait FanController {
     }
 }
 
+// put id:"platform_select", label:"Platform Detection", node_type:"decision", output:"controller.internal"
+
 /// Create the platform-appropriate controller.
 pub fn create_controller() -> Result<Box<dyn FanController>, FanControlError> {
     #[cfg(target_os = "linux")]

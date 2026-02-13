@@ -1,3 +1,5 @@
+// put id:"cli_def", label:"CLI Definition (clap)", output:"cli_command.internal"
+
 use clap::{ArgAction, Parser, Subcommand};
 
 #[derive(Parser)]

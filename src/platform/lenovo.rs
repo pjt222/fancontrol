@@ -1,3 +1,8 @@
+// put id:"lenovo_discover", label:"Lenovo Discovery (PowerShell)", output:"fan_list.internal, fan_curves.internal, rpm_ranges.internal"
+// put id:"lenovo_ps", label:"PowerShell WMI Subprocess", input:"wmi_script.internal", output:"ps_stdout.internal", node_type:"subprocess"
+// put id:"lenovo_parse", label:"Parse TABLE|FAN|FULLSPEED", input:"ps_stdout.internal", output:"fan_list.internal"
+// put id:"lenovo_set", label:"Set Fan Speed (WMI)", input:"pwm_command.internal"
+
 //! Lenovo Legion fan controller backend using vendor-specific WMI.
 //!
 //! Uses `LENOVO_FAN_METHOD` and `LENOVO_FAN_TABLE_DATA` in the `root\WMI`

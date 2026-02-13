@@ -1,3 +1,5 @@
+// put id:"fan_structs", label:"Fan/FanCurve Data Structs", node_type:"database"
+
 use std::fmt;
 
 /// A single temperature→RPM point in a fan curve.

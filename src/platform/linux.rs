@@ -1,3 +1,7 @@
+// put id:"linux_discover", label:"Scan sysfs/hwmon", input:"/sys/class/hwmon/", output:"fan_list.internal"
+// put id:"linux_read", label:"Read Fan Speed", input:"/sys/class/hwmon/*/fan*_input"
+// put id:"linux_write", label:"Write PWM Value", output:"/sys/class/hwmon/*/pwm*"
+
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
