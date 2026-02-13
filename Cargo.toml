@@ -8,6 +8,8 @@ authors = ["Philipp Thoss <ph.thoss@gmx.de>"]
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
+log = "0.4"
+simplelog = "0.12"
 thiserror = "2"
 eframe = "0.30"
 

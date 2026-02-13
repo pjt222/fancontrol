@@ -6,6 +6,8 @@
 
 use std::process::Command;
 
+use log::{debug, info, warn};
+
 use crate::errors::FanControlError;
 use crate::fan::Fan;
 use super::FanController;
@@ -24,20 +26,27 @@ impl LenovoFanController {
 
     /// Call a WMI method via PowerShell and return the raw stdout.
     fn ps_command(script: &str) -> Result<String, FanControlError> {
+        debug!("ps_command: {}", script);
         let output = Command::new("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command", script])
             .output()
-            .map_err(|e| FanControlError::Platform(format!("failed to run powershell: {e}")))?;
+            .map_err(|e| {
+                warn!("ps_command failed to launch: {e}");
+                FanControlError::Platform(format!("failed to run powershell: {e}"))
+            })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!("ps_command stderr: {}", stderr.trim());
             return Err(FanControlError::Platform(format!(
                 "powershell error: {}",
                 stderr.trim()
             )));
         }
 
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        debug!("ps_command stdout: {}", stdout);
+        Ok(stdout)
     }
 
     /// Read current fan speed in RPM for a given fan ID (0 or 1).
@@ -52,18 +61,6 @@ impl LenovoFanController {
             .map_err(|e| FanControlError::Platform(format!("failed to parse fan speed: {e}")))
     }
 
-    /// Read sensor temperature for a given sensor ID.
-    fn read_sensor_temp(sensor_id: u32) -> Result<u32, FanControlError> {
-        let script = format!(
-            "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
-             ($fm.Fan_GetCurrentSensorTemperature({sensor_id})).CurrentSensorTemperature"
-        );
-        let output = Self::ps_command(&script)?;
-        output
-            .parse::<u32>()
-            .map_err(|e| FanControlError::Platform(format!("failed to parse sensor temp: {e}")))
-    }
-
     /// Map PWM (0–255) to RPM within the fan's operating range.
     fn pwm_to_rpm(pwm: u8) -> u32 {
         let ratio = pwm as f64 / 255.0;
@@ -73,43 +70,44 @@ impl LenovoFanController {
 
 impl FanController for LenovoFanController {
     fn discover(&self) -> Result<Vec<Fan>, FanControlError> {
-        // Query fan table data to discover fans and their sensor mappings.
+        // Single PowerShell invocation: discover fans, read speeds and temps.
+        // Group by Fan_Id taking the highest Sensor_ID per fan (the one
+        // that actually returns temperature data on this hardware).
         let script =
-            "$tables = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_TABLE_DATA; \
-             $tables | Select-Object -Property Fan_Id, Sensor_ID, CurrentFanMinSpeed, CurrentFanMaxSpeed, InstanceName | \
-             ForEach-Object { \"$($_.Fan_Id)|$($_.Sensor_ID)|$($_.CurrentFanMinSpeed)|$($_.CurrentFanMaxSpeed)|$($_.InstanceName)\" }";
+            "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
+             $tables = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_TABLE_DATA; \
+             $best = @{}; \
+             foreach ($t in $tables) { \
+               $fid = $t.Fan_Id; \
+               if (-not $best.ContainsKey($fid) -or $t.Sensor_ID -gt $best[$fid]) { \
+                 $best[$fid] = $t.Sensor_ID \
+               } \
+             }; \
+             foreach ($fid in ($best.Keys | Sort-Object)) { \
+               $sid = $best[$fid]; \
+               $speed = ($fm.Fan_GetCurrentFanSpeed($fid)).CurrentFanSpeed; \
+               $temp = ($fm.Fan_GetCurrentSensorTemperature($sid)).CurrentSensorTemperature; \
+               Write-Output \"$fid|$sid|$speed|$temp\" \
+             }";
 
         let output = Self::ps_command(script)?;
 
-        // Deduplicate by Fan_Id (multiple table entries per fan for different sensors).
-        let mut seen_fans = std::collections::HashMap::new();
-
+        let mut fans = Vec::new();
         for line in output.lines() {
             let parts: Vec<&str> = line.split('|').collect();
-            if parts.len() < 5 {
+            if parts.len() < 4 {
                 continue;
             }
 
             let fan_id: u32 = parts[0].trim().parse().unwrap_or(0);
-            let sensor_id: u32 = parts[1].trim().parse().unwrap_or(0);
+            let speed_rpm: u32 = parts[2].trim().parse().unwrap_or(0);
+            let temp: u32 = parts[3].trim().parse().unwrap_or(0);
 
-            seen_fans.entry(fan_id).or_insert(sensor_id);
-        }
-
-        let mut fans = Vec::new();
-        let mut fan_ids: Vec<u32> = seen_fans.keys().copied().collect();
-        fan_ids.sort();
-
-        for fan_id in fan_ids {
             let label = match fan_id {
                 0 => "CPU Fan".to_string(),
                 1 => "GPU Fan".to_string(),
                 n => format!("Fan {n}"),
             };
-
-            let speed_rpm = Self::read_fan_speed(fan_id).unwrap_or(0);
-            let sensor_id = seen_fans[&fan_id];
-            let temp = Self::read_sensor_temp(sensor_id).unwrap_or(0);
 
             fans.push(Fan {
                 id: format!("fan{fan_id}"),
@@ -132,20 +130,20 @@ impl FanController for LenovoFanController {
         let numeric_id = parse_fan_id(fan_id)?;
 
         if pwm == 255 {
-            // Full speed mode
+            info!("set_pwm({fan_id}, 255) -> Fan_Set_FullSpeed(1)");
             let script =
                 "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
                  $fm.Fan_Set_FullSpeed(1)";
             Self::ps_command(script)?;
         } else if pwm == 0 {
-            // Return to automatic control
+            info!("set_pwm({fan_id}, 0) -> Fan_Set_FullSpeed(0) [auto]");
             let script =
                 "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
                  $fm.Fan_Set_FullSpeed(0)";
             Self::ps_command(script)?;
         } else {
-            // Set specific speed via RPM
             let target_rpm = Self::pwm_to_rpm(pwm);
+            info!("set_pwm({fan_id}, {pwm}) -> Fan_SetCurrentFanSpeed({numeric_id}, {target_rpm})");
             let script = format!(
                 "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
                  $fm.Fan_SetCurrentFanSpeed({numeric_id}, {target_rpm})"
@@ -156,19 +154,13 @@ impl FanController for LenovoFanController {
         Ok(())
     }
 
-    fn stop_fan(&self, fan_id: &str) -> Result<(), FanControlError> {
-        let numeric_id = parse_fan_id(fan_id)?;
-        // Step 1: release manual override back to BIOS auto control.
-        let auto_script =
+    fn stop_fan(&self, _fan_id: &str) -> Result<(), FanControlError> {
+        // Release to BIOS auto control — same WMI call that previously
+        // achieved 0 RPM when invoked via set_pwm(0) from the slider.
+        let script =
             "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
              $fm.Fan_Set_FullSpeed(0)";
-        Self::ps_command(auto_script)?;
-        // Step 2: request lowest possible speed.
-        let min_script = format!(
-            "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
-             $fm.Fan_SetCurrentFanSpeed({numeric_id}, 0)"
-        );
-        Self::ps_command(&min_script)?;
+        Self::ps_command(script)?;
         Ok(())
     }
 }

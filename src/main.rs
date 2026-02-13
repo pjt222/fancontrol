@@ -7,13 +7,28 @@ mod platform;
 use std::thread;
 use std::time::Duration;
 
+use std::fs::File;
+
 use anyhow::Result;
 use clap::Parser;
+use log::info;
+use simplelog::{Config, LevelFilter, WriteLogger};
 
 use cli::{Cli, Commands};
 use platform::{create_controller, FanController};
 
 fn main() -> Result<()> {
+    // Log to fancontrol.log next to the executable.
+    let log_path = std::env::current_exe()
+        .unwrap_or_default()
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("fancontrol.log");
+    if let Ok(file) = File::create(&log_path) {
+        let _ = WriteLogger::init(LevelFilter::Debug, Config::default(), file);
+    }
+    info!("fancontrol started");
+
     let cli = Cli::parse();
 
     match cli.command {

@@ -10,6 +10,7 @@ use std::thread;
 use std::time::Duration;
 
 use eframe::egui;
+use log::{debug, info, warn};
 
 use crate::fan::Fan;
 use crate::platform::create_controller;
@@ -21,13 +22,11 @@ use crate::platform::create_controller;
 enum WorkerCommand {
     Refresh,
     SetPwm { fan_id: String, pwm: u8 },
-    StopFan { fan_id: String },
 }
 
 enum WorkerResponse {
     FanData(Vec<Fan>),
     PwmSet { fan_id: String, pwm: u8 },
-    FanStopped { fan_id: String },
     Error(String),
 }
 
@@ -42,6 +41,9 @@ fn spawn_worker(
 ) {
     thread::spawn(move || {
         let controller = create_controller();
+        // Last PWM value set by the user per fan. Re-applied each poll
+        // cycle so Fn+Q or other BIOS overrides don't stick.
+        let mut held_pwm: HashMap<String, u8> = HashMap::new();
 
         // Initial discovery.
         match controller.discover() {
@@ -60,21 +62,43 @@ fn spawn_worker(
 
             match command {
                 WorkerCommand::Refresh => {
+                    // Re-apply held PWM values before polling.
+                    for (fan_id, pwm) in &held_pwm {
+                        debug!("re-applying held PWM: {fan_id}={pwm}");
+                        if let Err(error) = controller.set_pwm(fan_id, *pwm) {
+                            warn!("re-apply {fan_id}={pwm} failed: {error}");
+                        }
+                    }
                     match controller.discover() {
-                        Ok(fans) => { let _ = response_tx.send(WorkerResponse::FanData(fans)); }
-                        Err(error) => { let _ = response_tx.send(WorkerResponse::Error(error.to_string())); }
+                        Ok(ref fans) => {
+                            for fan in fans {
+                                debug!("poll: {} {} RPM pwm={:?}", fan.id, fan.speed_rpm, fan.pwm);
+                            }
+                            let _ = response_tx.send(WorkerResponse::FanData(fans.clone()));
+                        }
+                        Err(error) => {
+                            warn!("discover failed: {error}");
+                            let _ = response_tx.send(WorkerResponse::Error(error.to_string()));
+                        }
                     }
                 }
                 WorkerCommand::SetPwm { fan_id, pwm } => {
+                    info!("user SetPwm: {fan_id}={pwm}");
                     match controller.set_pwm(&fan_id, pwm) {
-                        Ok(()) => { let _ = response_tx.send(WorkerResponse::PwmSet { fan_id, pwm }); }
-                        Err(error) => { let _ = response_tx.send(WorkerResponse::Error(error.to_string())); }
-                    }
-                }
-                WorkerCommand::StopFan { fan_id } => {
-                    match controller.stop_fan(&fan_id) {
-                        Ok(()) => { let _ = response_tx.send(WorkerResponse::FanStopped { fan_id }); }
-                        Err(error) => { let _ = response_tx.send(WorkerResponse::Error(error.to_string())); }
+                        Ok(()) => {
+                            if pwm == 0 {
+                                // PWM 0 = return to BIOS auto; stop re-applying.
+                                held_pwm.remove(&fan_id);
+                            } else {
+                                held_pwm.insert(fan_id.clone(), pwm);
+                            }
+                            info!("held_pwm updated: {:?}", held_pwm);
+                            let _ = response_tx.send(WorkerResponse::PwmSet { fan_id, pwm });
+                        }
+                        Err(error) => {
+                            warn!("SetPwm {fan_id}={pwm} failed: {error}");
+                            let _ = response_tx.send(WorkerResponse::Error(error.to_string()));
+                        }
                     }
                 }
             }
@@ -91,7 +115,6 @@ fn spawn_worker(
 struct FanControlApp {
     fans: Vec<Fan>,
     slider_values: HashMap<String, f32>,
-    auto_mode: HashMap<String, bool>,
     status_message: String,
     command_tx: mpsc::Sender<WorkerCommand>,
     response_rx: mpsc::Receiver<WorkerResponse>,
@@ -105,7 +128,6 @@ impl FanControlApp {
         Self {
             fans: Vec::new(),
             slider_values: HashMap::new(),
-            auto_mode: HashMap::new(),
             status_message: "Discovering fans...".into(),
             command_tx,
             response_rx,
@@ -117,11 +139,9 @@ impl FanControlApp {
             match response {
                 WorkerResponse::FanData(fans) => {
                     for fan in &fans {
-                        self.auto_mode.entry(fan.id.clone()).or_insert(true);
-
                         if let Some(pwm) = fan.pwm {
                             self.slider_values.entry(fan.id.clone())
-                                .or_insert((pwm as f32).max(1.0));
+                                .or_insert(pwm as f32);
                         }
                     }
                     self.fans = fans;
@@ -129,9 +149,6 @@ impl FanControlApp {
                 }
                 WorkerResponse::PwmSet { fan_id, pwm } => {
                     self.status_message = format!("Set {} PWM to {}", fan_id, pwm);
-                }
-                WorkerResponse::FanStopped { fan_id } => {
-                    self.status_message = format!("Stopped {}", fan_id);
                 }
                 WorkerResponse::Error(message) => {
                     self.status_message = format!("Error: {}", message);
@@ -189,41 +206,15 @@ impl eframe::App for FanControlApp {
                         });
 
                         if fan.controllable {
-                            let is_auto = self.auto_mode.get(&fan.id).copied().unwrap_or(true);
-
-                            // Auto mode toggle + Kill button.
-                            ui.horizontal(|ui| {
-                                let mut auto_checked = is_auto;
-                                if ui.checkbox(&mut auto_checked, "Auto").changed() {
-                                    self.auto_mode.insert(fan.id.clone(), auto_checked);
-                                    if auto_checked {
-                                        let _ = self.command_tx.send(WorkerCommand::SetPwm {
-                                            fan_id: fan.id.clone(),
-                                            pwm: 0,
-                                        });
-                                    }
-                                }
-
-                                if ui.button("Kill").clicked() {
-                                    self.auto_mode.insert(fan.id.clone(), false);
-                                    let _ = self.command_tx.send(WorkerCommand::StopFan {
-                                        fan_id: fan.id.clone(),
-                                    });
-                                }
-                            });
-
-                            // PWM slider + Set button — disabled in auto mode.
                             if let Some(slider_value) = self.slider_values.get_mut(&fan.id) {
                                 ui.horizontal(|ui| {
-                                    ui.label("Target:");
-                                    ui.add_enabled_ui(!is_auto, |ui| {
-                                        ui.add(
-                                            egui::Slider::new(slider_value, 1.0..=255.0)
-                                                .step_by(1.0)
-                                                .fixed_decimals(0),
-                                        );
-                                    });
-                                    if ui.add_enabled(!is_auto, egui::Button::new("Set")).clicked() {
+                                    ui.add(
+                                        egui::Slider::new(slider_value, 0.0..=255.0)
+                                            .step_by(1.0)
+                                            .fixed_decimals(0)
+                                            .text("PWM"),
+                                    );
+                                    if ui.button("Set").clicked() {
                                         let _ = self.command_tx.send(WorkerCommand::SetPwm {
                                             fan_id: fan.id.clone(),
                                             pwm: *slider_value as u8,
