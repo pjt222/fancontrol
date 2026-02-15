@@ -50,6 +50,35 @@ pub enum Commands {
         fan_id: Option<u32>,
     },
 
+    /// Write a custom fan curve (temperature→RPM pairs)
+    SetCurve {
+        /// Fan ID (numeric, e.g. 0 or 1)
+        #[arg(long)]
+        fan_id: u32,
+
+        /// Sensor ID (numeric, e.g. 3 or 4)
+        #[arg(long)]
+        sensor_id: u32,
+
+        /// Temperature→RPM pairs as "temp:rpm" (e.g. 50:1600 60:2100 70:3200 85:4800)
+        #[arg(required = true, num_args = 2..)]
+        points: Vec<String>,
+    },
+
+    /// Back up current fan curves to a JSON file
+    BackupCurves {
+        /// Output file path (default: fan_curves_backup.json)
+        #[arg(short, long, default_value = "fan_curves_backup.json")]
+        output: String,
+    },
+
+    /// Restore fan curves from a JSON backup file
+    RestoreCurves {
+        /// Input file path
+        #[arg(short, long, default_value = "fan_curves_backup.json")]
+        input: String,
+    },
+
     /// Open the graphical fan control interface
     Gui,
 }

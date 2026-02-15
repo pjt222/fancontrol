@@ -2,8 +2,10 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 /// A single temperature→RPM point in a fan curve.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FanCurvePoint {
     /// Temperature threshold in degrees Celsius.
     pub temperature: u32,
@@ -15,7 +17,7 @@ pub struct FanCurvePoint {
 ///
 /// Each curve binds one fan to one sensor. The EC takes the maximum speed
 /// demanded across all sensor curves for a given fan.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FanCurve {
     pub fan_id: u32,
     pub sensor_id: u32,
