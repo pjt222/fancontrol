@@ -18,8 +18,8 @@ use std::time::Duration;
 use eframe::egui;
 use log::{debug, info, warn};
 
-use crate::fan::{Fan, FanCurve};
-use crate::platform::create_controller;
+use crate::fan::{Fan, FanCurve, FanCurvePoint};
+use crate::platform::{build_curve_from_points, create_controller, validate_curve};
 
 // ---------------------------------------------------------------------------
 // Worker <-> UI protocol
@@ -28,12 +28,14 @@ use crate::platform::create_controller;
 enum WorkerCommand {
     Refresh,
     SetPwm { fan_id: String, pwm: u8 },
+    SetCurve { curve: FanCurve },
 }
 
 enum WorkerResponse {
     FanData(Vec<Fan>),
     CurveData(HashMap<String, Vec<FanCurve>>),
     PwmSet { fan_id: String, pwm: u8 },
+    CurveSet { fan_id: u32, sensor_id: u32 },
     Error(String),
 }
 
@@ -132,6 +134,29 @@ fn spawn_worker(
                         }
                     }
                 }
+                WorkerCommand::SetCurve { curve } => {
+                    info!(
+                        "user SetCurve: fan={} sensor={} points={}",
+                        curve.fan_id,
+                        curve.sensor_id,
+                        curve.points.len()
+                    );
+                    match controller.set_fan_curve(&curve) {
+                        Ok(()) => {
+                            let fan_id = curve.fan_id;
+                            let sensor_id = curve.sensor_id;
+                            let _ =
+                                response_tx.send(WorkerResponse::CurveSet { fan_id, sensor_id });
+                        }
+                        Err(error) => {
+                            warn!(
+                                "SetCurve fan={} sensor={} failed: {error}",
+                                curve.fan_id, curve.sensor_id
+                            );
+                            let _ = response_tx.send(WorkerResponse::Error(error.to_string()));
+                        }
+                    }
+                }
             }
 
             repaint_ctx.request_repaint();
@@ -143,11 +168,17 @@ fn spawn_worker(
 // App state
 // ---------------------------------------------------------------------------
 
+/// Key for identifying a specific editable curve (fan_id, sensor_id).
+type CurveEditKey = (u32, u32);
+
 struct FanControlApp {
     fans: Vec<Fan>,
     slider_values: HashMap<String, f32>,
     /// Curve data per fan, sent once at startup.
     fan_curves: HashMap<String, Vec<FanCurve>>,
+    /// Editable copies of curves, keyed by (fan_id, sensor_id).
+    /// Populated when the user first expands the edit section.
+    editing_curves: HashMap<CurveEditKey, Vec<(String, String)>>,
     status_message: String,
     command_tx: mpsc::Sender<WorkerCommand>,
     response_rx: mpsc::Receiver<WorkerResponse>,
@@ -162,6 +193,7 @@ impl FanControlApp {
             fans: Vec::new(),
             slider_values: HashMap::new(),
             fan_curves: HashMap::new(),
+            editing_curves: HashMap::new(),
             status_message: "Discovering fans...".into(),
             command_tx,
             response_rx,
@@ -187,6 +219,10 @@ impl FanControlApp {
                 }
                 WorkerResponse::PwmSet { fan_id, pwm } => {
                     self.status_message = format!("Set {} PWM to {}", fan_id, pwm);
+                }
+                WorkerResponse::CurveSet { fan_id, sensor_id } => {
+                    self.status_message =
+                        format!("Curve written for fan {} sensor {}", fan_id, sensor_id);
                 }
                 WorkerResponse::Error(message) => {
                     self.status_message = format!("Error: {}", message);
@@ -317,6 +353,148 @@ impl eframe::App for FanControlApp {
                                                         ));
                                                         ui.label(format!("{}", point.fan_speed));
                                                         ui.end_row();
+                                                    }
+                                                },
+                                            );
+
+                                            // Editable curve section.
+                                            let edit_key = (curve.fan_id, curve.sensor_id);
+                                            egui::CollapsingHeader::new(format!(
+                                                "Edit Curve (Sensor {})",
+                                                curve.sensor_id
+                                            ))
+                                            .id_salt(format!(
+                                                "edit_curve_{}_{}",
+                                                curve.fan_id, curve.sensor_id
+                                            ))
+                                            .default_open(false)
+                                            .show(
+                                                ui,
+                                                |ui| {
+                                                    // Initialize edit state from curve if not already present.
+                                                    let edit_points = self
+                                                        .editing_curves
+                                                        .entry(edit_key)
+                                                        .or_insert_with(|| {
+                                                            curve
+                                                                .points
+                                                                .iter()
+                                                                .map(|p| {
+                                                                    (
+                                                                        p.temperature.to_string(),
+                                                                        p.fan_speed.to_string(),
+                                                                    )
+                                                                })
+                                                                .collect()
+                                                        });
+
+                                                    egui::Grid::new(format!(
+                                                        "edit_grid_{}_{}",
+                                                        edit_key.0, edit_key.1
+                                                    ))
+                                                    .show(ui, |ui| {
+                                                        ui.strong("Temp (\u{00B0}C)");
+                                                        ui.strong("RPM");
+                                                        ui.end_row();
+                                                        for (temp_str, rpm_str) in
+                                                            edit_points.iter_mut()
+                                                        {
+                                                            ui.add(
+                                                                egui::TextEdit::singleline(
+                                                                    temp_str,
+                                                                )
+                                                                .desired_width(60.0),
+                                                            );
+                                                            ui.add(
+                                                                egui::TextEdit::singleline(rpm_str)
+                                                                    .desired_width(80.0),
+                                                            );
+                                                            ui.end_row();
+                                                        }
+                                                    });
+
+                                                    ui.horizontal(|ui| {
+                                                        if ui.button("+ Add Point").clicked() {
+                                                            edit_points.push((
+                                                                String::new(),
+                                                                String::new(),
+                                                            ));
+                                                        }
+                                                        if edit_points.len() > 2
+                                                            && ui.button("- Remove Last").clicked()
+                                                        {
+                                                            edit_points.pop();
+                                                        }
+                                                    });
+
+                                                    if ui.button("Apply Curve").clicked() {
+                                                        // Parse and validate.
+                                                        let mut points = Vec::new();
+                                                        let mut parse_error = None;
+                                                        for (temp_str, rpm_str) in
+                                                            edit_points.iter()
+                                                        {
+                                                            match (
+                                                                temp_str.trim().parse::<u32>(),
+                                                                rpm_str.trim().parse::<u32>(),
+                                                            ) {
+                                                                (Ok(t), Ok(r)) => {
+                                                                    points.push(FanCurvePoint {
+                                                                        temperature: t,
+                                                                        fan_speed: r,
+                                                                    });
+                                                                }
+                                                                _ => {
+                                                                    parse_error = Some(format!(
+                                                                        "Invalid point: '{}:{}'",
+                                                                        temp_str, rpm_str
+                                                                    ));
+                                                                    break;
+                                                                }
+                                                            }
+                                                        }
+
+                                                        if let Some(err) = parse_error {
+                                                            self.status_message =
+                                                                format!("Error: {}", err);
+                                                        } else {
+                                                            let new_curve = build_curve_from_points(
+                                                                curve.fan_id,
+                                                                curve.sensor_id,
+                                                                points,
+                                                                Some(curve),
+                                                            );
+                                                            match validate_curve(&new_curve) {
+                                                                Ok(()) => {
+                                                                    let _ = self.command_tx.send(
+                                                                        WorkerCommand::SetCurve {
+                                                                            curve: new_curve,
+                                                                        },
+                                                                    );
+                                                                    self.status_message =
+                                                                        "Applying curve...".into();
+                                                                }
+                                                                Err(e) => {
+                                                                    self.status_message = format!(
+                                                                        "Validation: {}",
+                                                                        e
+                                                                    );
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+
+                                                    if ui.button("Reset to Current").clicked() {
+                                                        *edit_points = curve
+                                                            .points
+                                                            .iter()
+                                                            .map(|p| {
+                                                                (
+                                                                    p.temperature.to_string(),
+                                                                    p.fan_speed.to_string(),
+                                                                )
+                                                            })
+                                                            .collect();
                                                     }
                                                 },
                                             );

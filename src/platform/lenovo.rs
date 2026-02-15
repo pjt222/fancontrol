@@ -432,6 +432,52 @@ impl FanController for LenovoFanController {
 
         Ok(curves)
     }
+
+    fn set_fan_curve(&self, curve: &FanCurve) -> Result<(), FanControlError> {
+        use super::validate_curve;
+
+        validate_curve(curve)?;
+
+        let speeds: Vec<String> = curve
+            .points
+            .iter()
+            .map(|p| p.fan_speed.to_string())
+            .collect();
+        let temps: Vec<String> = curve
+            .points
+            .iter()
+            .map(|p| p.temperature.to_string())
+            .collect();
+
+        let speeds_csv = speeds.join(",");
+        let temps_csv = temps.join(",");
+
+        info!(
+            "set_fan_curve: fan={} sensor={} speeds=[{}] temps=[{}]",
+            curve.fan_id, curve.sensor_id, speeds_csv, temps_csv
+        );
+
+        // Build a PowerShell script that writes the fan curve via
+        // Fan_Set_Table. The WMI method signature uses UInt16 arrays for
+        // FanTable_Data (RPM values) and SensorTable_Data (temperature
+        // thresholds), matching the types exposed by LENOVO_FAN_TABLE_DATA.
+        // PowerShell integer arrays (@(1600,2100,...)) map directly to UInt16[].
+        let script = format!(
+            "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
+             $speeds = @({speeds_csv}); \
+             $temps = @({temps_csv}); \
+             $fm.Fan_Set_Table({fan_id}, {sensor_id}, $speeds, $temps)",
+            fan_id = curve.fan_id,
+            sensor_id = curve.sensor_id,
+        );
+
+        Self::ps_command(&script)?;
+        info!(
+            "set_fan_curve: successfully wrote curve for fan {} sensor {}",
+            curve.fan_id, curve.sensor_id
+        );
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------

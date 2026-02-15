@@ -1160,6 +1160,7 @@ dependencies = [
  "eframe",
  "log",
  "serde",
+ "serde_json",
  "simplelog",
  "tempfile",
  "thiserror 2.0.18",

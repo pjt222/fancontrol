@@ -6,11 +6,13 @@ A minimal cross-platform app to monitor and control fan speed on Linux and Windo
 
 ## Features
 
-- **CLI** with subcommands: `list`, `get`, `set`, `monitor`, `table`, `gui`
-- **GUI** (egui/eframe) with per-fan sliders, real-time polling, and fan curve display
+- **CLI** with subcommands: `list`, `get`, `set`, `monitor`, `table`, `set-curve`, `backup-curves`, `restore-curves`, `gui`
+- **GUI** (egui/eframe) with per-fan sliders, real-time polling, fan curve display, and editable fan curves
 - **Linux**: sysfs/hwmon backend — reads `fan*_input`, writes `pwm*`
 - **Windows**: WMI backend — generic `Win32_Fan` (read-only) with Lenovo Legion vendor support
-- **Lenovo Legion**: full speed toggle, manual RPM control, EC fan table/curve display
+- **Lenovo Legion**: full speed toggle, manual RPM control, EC fan table/curve display, custom fan curve writing
+- **Safety**: Fan curve validation prevents writing curves that could cause overheating
+- **Backup/Restore**: Save and restore fan curves to/from JSON files
 
 ## Architecture Diagram
 
@@ -108,6 +110,35 @@ fancontrol monitor [-i <SECONDS>]
 fancontrol table [--fan-id <ID>]
 ```
 
+### Set a custom fan curve
+
+Write a custom temperature→RPM curve to the EC (Lenovo only). Points are specified as `temperature:rpm` pairs.
+
+```
+fancontrol set-curve --fan-id 0 --sensor-id 3 55:1600 63:2100 70:3200 85:4800
+```
+
+Safety validation is performed before writing:
+- Temperatures must be strictly increasing
+- Fan speeds must be non-decreasing
+- The highest temperature point must have at least 50% of the fan's max RPM
+
+### Back up fan curves
+
+Save the current fan curves to a JSON file:
+
+```
+fancontrol backup-curves [-o fan_curves_backup.json]
+```
+
+### Restore fan curves
+
+Restore fan curves from a previously saved backup:
+
+```
+fancontrol restore-curves [-i fan_curves_backup.json]
+```
+
 ### Open the GUI
 
 ```
@@ -157,7 +188,8 @@ Default log level is Warn.
 - Linux backend requires root or appropriate permissions for PWM write access
 - Windows generic `Win32_Fan` is read-only — vendor-specific WMI is needed for control
 - Lenovo WMI `Fan_Get_Table` and `Fan_Get_MaxSpeed` return empty data on some firmware
-- Custom fan curve writing (`Fan_Set_Table`) is not yet implemented due to unknown byte format
+- Custom fan curve writing (`Fan_Set_Table`) byte format is based on reverse-engineering and may vary across firmware versions
+- Custom fan curves may not persist across reboots (firmware may re-flash defaults)
 
 ## Acknowledgments
 

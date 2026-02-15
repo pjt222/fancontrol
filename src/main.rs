@@ -15,7 +15,8 @@ use log::info;
 use simplelog::{ConfigBuilder, LevelFilter, WriteLogger};
 
 use cli::{Cli, Commands};
-use platform::{create_controller, FanController};
+use fan::{FanCurve, FanCurvePoint};
+use platform::{build_curve_from_points, create_controller, validate_curve, FanController};
 
 // put id:"cli_parse", label:"Parse CLI Arguments", output:"cli_command.internal"
 // put id:"setup_logging", label:"Setup File Logger", output:"fancontrol.log"
@@ -57,6 +58,13 @@ fn main() -> Result<()> {
                 Commands::Set { fan_id, pwm } => cmd_set(&*controller, &fan_id, pwm),
                 Commands::Monitor { interval } => cmd_monitor(&*controller, interval),
                 Commands::Table { fan_id } => cmd_table(&*controller, fan_id),
+                Commands::SetCurve {
+                    fan_id,
+                    sensor_id,
+                    points,
+                } => cmd_set_curve(&*controller, fan_id, sensor_id, &points),
+                Commands::BackupCurves { output } => cmd_backup_curves(&*controller, &output),
+                Commands::RestoreCurves { input } => cmd_restore_curves(&*controller, &input),
                 Commands::Gui => unreachable!(),
             }
         }
@@ -197,4 +205,105 @@ fn cmd_monitor(controller: &dyn FanController, interval_secs: u64) -> Result<()>
 
         thread::sleep(Duration::from_secs(interval_secs));
     }
+}
+
+/// Parse "temp:rpm" strings into FanCurvePoint values.
+fn parse_curve_points(points: &[String]) -> Result<Vec<FanCurvePoint>> {
+    let mut parsed = Vec::with_capacity(points.len());
+    for s in points {
+        let parts: Vec<&str> = s.split(':').collect();
+        if parts.len() != 2 {
+            anyhow::bail!(
+                "invalid point format '{}': expected 'temperature:rpm' (e.g. 60:2100)",
+                s
+            );
+        }
+        let temperature: u32 = parts[0]
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid temperature in '{}': not a number", s))?;
+        let fan_speed: u32 = parts[1]
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid RPM in '{}': not a number", s))?;
+        parsed.push(FanCurvePoint {
+            temperature,
+            fan_speed,
+        });
+    }
+    Ok(parsed)
+}
+
+fn cmd_set_curve(
+    controller: &dyn FanController,
+    fan_id: u32,
+    sensor_id: u32,
+    points: &[String],
+) -> Result<()> {
+    let parsed_points = parse_curve_points(points)?;
+
+    // Try to find the existing curve for reference metadata.
+    let existing_curves = controller.get_fan_curves().unwrap_or_default();
+    let reference = existing_curves
+        .iter()
+        .find(|c| c.fan_id == fan_id && c.sensor_id == sensor_id);
+
+    let curve = build_curve_from_points(fan_id, sensor_id, parsed_points, reference);
+
+    // Validate before writing.
+    validate_curve(&curve)?;
+
+    println!("Writing fan curve for fan {} sensor {}:", fan_id, sensor_id);
+    for point in &curve.points {
+        println!(
+            "  {}\u{00B0}C \u{2192} {} RPM",
+            point.temperature, point.fan_speed
+        );
+    }
+
+    controller.set_fan_curve(&curve)?;
+    println!("Fan curve written successfully.");
+    Ok(())
+}
+
+fn cmd_backup_curves(controller: &dyn FanController, output_path: &str) -> Result<()> {
+    let curves = controller.get_fan_curves()?;
+    if curves.is_empty() {
+        println!("No fan curves to back up.");
+        return Ok(());
+    }
+
+    let json = serde_json::to_string_pretty(&curves)?;
+    std::fs::write(output_path, &json)?;
+    println!("Backed up {} curve(s) to {}", curves.len(), output_path);
+    Ok(())
+}
+
+fn cmd_restore_curves(controller: &dyn FanController, input_path: &str) -> Result<()> {
+    let json = std::fs::read_to_string(input_path)?;
+    let curves: Vec<FanCurve> = serde_json::from_str(&json)?;
+
+    if curves.is_empty() {
+        println!("Backup file contains no curves.");
+        return Ok(());
+    }
+
+    println!("Restoring {} curve(s) from {}...", curves.len(), input_path);
+    for curve in &curves {
+        validate_curve(curve)?;
+
+        let fan_label = match curve.fan_id {
+            0 => "CPU Fan",
+            1 => "GPU Fan",
+            _ => "Fan",
+        };
+        println!(
+            "  Fan {} ({}) \u{2014} Sensor {} ({} points)",
+            curve.fan_id,
+            fan_label,
+            curve.sensor_id,
+            curve.points.len()
+        );
+        controller.set_fan_curve(curve)?;
+    }
+    println!("All curves restored successfully.");
+    Ok(())
 }

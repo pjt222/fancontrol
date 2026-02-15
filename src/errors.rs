@@ -8,6 +8,9 @@ pub enum FanControlError {
     #[error("fan '{0}' is not controllable")]
     NotControllable(String),
 
+    #[error("invalid fan curve: {0}")]
+    InvalidCurve(String),
+
     #[error("permission denied: {0}")]
     PermissionDenied(String),
 
