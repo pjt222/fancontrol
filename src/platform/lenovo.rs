@@ -458,8 +458,10 @@ impl FanController for LenovoFanController {
         );
 
         // Build a PowerShell script that writes the fan curve via
-        // Fan_Set_Table. The method takes (Fan_ID, Sensor_ID, FanTable_Data,
-        // SensorTable_Data) as byte arrays matching LENOVO_FAN_TABLE_DATA.
+        // Fan_Set_Table. The WMI method signature uses UInt16 arrays for
+        // FanTable_Data (RPM values) and SensorTable_Data (temperature
+        // thresholds), matching the types exposed by LENOVO_FAN_TABLE_DATA.
+        // PowerShell integer arrays (@(1600,2100,...)) map directly to UInt16[].
         let script = format!(
             "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
              $speeds = @({speeds_csv}); \
