@@ -16,7 +16,7 @@ use log::{debug, info, warn};
 
 use super::FanController;
 use crate::errors::FanControlError;
-use crate::fan::{Fan, FanCurve, FanCurvePoint};
+use crate::fan::{CustomFanCurve, Fan, FanCurve, FanCurvePoint};
 
 /// Fallback RPM range used when table data is unavailable.
 const DEFAULT_MIN_RPM: u32 = 1600;
@@ -164,6 +164,91 @@ fn parse_fan_line(
         curves,
         full_speed_active,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Custom fan curve encoding and validation (pure — no I/O)
+// ---------------------------------------------------------------------------
+
+/// Maximum allowed value for a speed step index.
+const MAX_STEP_VALUE: u8 = 10;
+
+/// Size of the Fan_Set_Table byte buffer.
+const FAN_TABLE_BUFFER_SIZE: usize = 64;
+
+/// Encode a CustomFanCurve into the 64-byte array expected by Fan_Set_Table.
+///
+/// Layout:
+///   [0]     FSTM = 1 (write mode)
+///   [1]     FSID = 0 (sensor set ID)
+///   [2..6]  FSTL = 0x00000000 (uint32 LE, always zero)
+///   [6..26] FSS0–FSS9: 10 × uint16 LE speed step indices
+///   [26..64] zero padding
+fn encode_fan_table_bytes(curve: &CustomFanCurve) -> [u8; FAN_TABLE_BUFFER_SIZE] {
+    let mut bytes = [0u8; FAN_TABLE_BUFFER_SIZE];
+    bytes[0] = 1; // FSTM: write mode
+    bytes[1] = 0; // FSID: sensor set ID
+                  // bytes[2..6] already zero (FSTL)
+    for (i, &step) in curve.steps.iter().enumerate() {
+        let offset = 6 + i * 2;
+        let value = step as u16;
+        bytes[offset] = (value & 0xFF) as u8;
+        bytes[offset + 1] = (value >> 8) as u8;
+    }
+    bytes
+}
+
+/// Validate a custom curve's step values, enforcing safety constraints.
+///
+/// Rules:
+///   - All steps must be in range 0–10
+///   - Steps must be non-decreasing (no "death valley" curves)
+///   - Step 8 must be ≥ 3 (high-temp safety minimum)
+///   - Step 9 must be ≥ 5 (max-temp safety minimum)
+///
+/// Safety minimums match LenovoLegionToolkit V2: `[1,1,1,1,1,1,1,1,3,5]`.
+fn validate_custom_curve(curve: &CustomFanCurve) -> Result<(), FanControlError> {
+    for (i, &step) in curve.steps.iter().enumerate() {
+        if step > MAX_STEP_VALUE {
+            return Err(FanControlError::Platform(format!(
+                "step {i} value {step} exceeds maximum {MAX_STEP_VALUE}"
+            )));
+        }
+    }
+
+    // Non-decreasing constraint
+    for i in 1..10 {
+        if curve.steps[i] < curve.steps[i - 1] {
+            return Err(FanControlError::Platform(format!(
+                "steps must be non-decreasing: step[{i}]={} < step[{}]={}",
+                curve.steps[i],
+                i - 1,
+                curve.steps[i - 1]
+            )));
+        }
+    }
+
+    // High-temperature safety minimums
+    if curve.steps[8] < 3 {
+        return Err(FanControlError::Platform(format!(
+            "step 8 (high temp) must be >= 3 for safety, got {}",
+            curve.steps[8]
+        )));
+    }
+    if curve.steps[9] < 5 {
+        return Err(FanControlError::Platform(format!(
+            "step 9 (max temp) must be >= 5 for safety, got {}",
+            curve.steps[9]
+        )));
+    }
+
+    Ok(())
+}
+
+/// Format a byte array as a PowerShell byte array literal: `@(1,0,0,...)`.
+fn format_ps_byte_array(bytes: &[u8]) -> String {
+    let values: Vec<String> = bytes.iter().map(|b| b.to_string()).collect();
+    format!("@({})", values.join(","))
 }
 
 // ---------------------------------------------------------------------------
@@ -364,6 +449,81 @@ impl FanController for LenovoFanController {
             Self::ps_command(&script)?;
         }
 
+        Ok(())
+    }
+
+    fn set_custom_curve(&self, curve: &CustomFanCurve) -> Result<(), FanControlError> {
+        validate_custom_curve(curve)?;
+
+        // Ensure SmartFanMode is set to Custom (3) — required for Fan_Set_Table.
+        match self.get_smart_fan_mode()? {
+            Some(3) => {
+                debug!("SmartFanMode already Custom (3)");
+            }
+            Some(mode) => {
+                warn!("SmartFanMode is {mode}, switching to Custom (3) for fan curve write");
+                self.set_smart_fan_mode(3)?;
+            }
+            None => {
+                warn!("Could not read SmartFanMode, attempting Fan_Set_Table anyway");
+            }
+        }
+
+        let bytes = encode_fan_table_bytes(curve);
+        let ps_array = format_ps_byte_array(&bytes);
+        info!(
+            "set_custom_curve: fan_id={} sensor_id={} steps={:?}",
+            curve.fan_id, curve.sensor_id, curve.steps
+        );
+
+        let script = format!(
+            "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
+             [byte[]]$table = {ps_array}; \
+             $fm.Fan_Set_Table($table)"
+        );
+        Self::ps_command(&script)?;
+        info!("Fan_Set_Table called successfully");
+        Ok(())
+    }
+
+    fn get_smart_fan_mode(&self) -> Result<Option<u32>, FanControlError> {
+        let script = "$gz = Get-WmiObject -Namespace root/WMI -Class LENOVO_GAMEZONE_DATA; \
+             $result = $gz.GetSmartFanMode(); \
+             $result.Properties | ForEach-Object { \
+               if ($_.Value -ne $null -and $_.Name -ne '__PATH' -and $_.Name -ne '__GENUS' -and \
+                   $_.Name -ne '__CLASS' -and $_.Name -ne '__SUPERCLASS' -and \
+                   $_.Name -ne '__DYNASTY' -and $_.Name -ne '__RELPATH' -and \
+                   $_.Name -ne '__PROPERTY_COUNT' -and $_.Name -ne '__DERIVATION' -and \
+                   $_.Name -ne '__SERVER' -and $_.Name -ne '__NAMESPACE') { \
+                 Write-Output \"$($_.Name)|$($_.Value)\" \
+               } \
+             }";
+
+        let output = Self::ps_command(script)?;
+        // Parse "PropertyName|Value" lines to find the mode value
+        for line in output.lines() {
+            if let Some((name, value_str)) = line.split_once('|') {
+                let name_lower = name.trim().to_lowercase();
+                if name_lower == "mode" || name_lower == "data" || name_lower == "smartfanmode" {
+                    if let Ok(value) = value_str.trim().parse::<u32>() {
+                        debug!("SmartFanMode: {name}={value}");
+                        return Ok(Some(value));
+                    }
+                }
+            }
+        }
+
+        warn!("Could not determine SmartFanMode from output: {output}");
+        Ok(None)
+    }
+
+    fn set_smart_fan_mode(&self, mode: u32) -> Result<(), FanControlError> {
+        info!("set_smart_fan_mode({mode})");
+        let script = format!(
+            "$gz = Get-WmiObject -Namespace root/WMI -Class LENOVO_GAMEZONE_DATA; \
+             $gz.SetSmartFanMode({mode})"
+        );
+        Self::ps_command(&script)?;
         Ok(())
     }
 
@@ -615,6 +775,208 @@ mod tests {
         let mut curves = HashMap::new();
         assert!(parse_fan_line("FAN|0|3", &ranges, &mut curves, false).is_none());
         assert!(parse_fan_line("", &ranges, &mut curves, false).is_none());
+    }
+
+    // -- encode_fan_table_bytes ---------------------------------------------
+
+    #[test]
+    fn encode_fan_table_bytes_header() {
+        let curve = CustomFanCurve {
+            fan_id: 0,
+            sensor_id: 3,
+            steps: [0, 0, 0, 0, 0, 0, 0, 0, 3, 5],
+        };
+        let bytes = encode_fan_table_bytes(&curve);
+        assert_eq!(bytes[0], 1, "FSTM should be 1");
+        assert_eq!(bytes[1], 0, "FSID should be 0");
+        assert_eq!(&bytes[2..6], &[0, 0, 0, 0], "FSTL should be zero");
+    }
+
+    #[test]
+    fn encode_fan_table_bytes_step_values() {
+        let curve = CustomFanCurve {
+            fan_id: 0,
+            sensor_id: 3,
+            steps: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        };
+        let bytes = encode_fan_table_bytes(&curve);
+        // Each step is encoded as uint16 LE starting at offset 6
+        for i in 0..10 {
+            let offset = 6 + i * 2;
+            let value = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
+            assert_eq!(value, (i + 1) as u16, "FSS{i} should be {}", i + 1);
+        }
+    }
+
+    #[test]
+    fn encode_fan_table_bytes_padding_is_zero() {
+        let curve = CustomFanCurve {
+            fan_id: 0,
+            sensor_id: 3,
+            steps: [10, 10, 10, 10, 10, 10, 10, 10, 10, 10],
+        };
+        let bytes = encode_fan_table_bytes(&curve);
+        assert_eq!(bytes.len(), 64);
+        // Bytes 26..64 should all be zero
+        for (i, &byte) in bytes[26..64].iter().enumerate() {
+            assert_eq!(byte, 0, "padding byte at offset {} should be 0", 26 + i);
+        }
+    }
+
+    #[test]
+    fn encode_fan_table_bytes_all_zeros() {
+        let curve = CustomFanCurve {
+            fan_id: 0,
+            sensor_id: 0,
+            steps: [0; 10],
+        };
+        let bytes = encode_fan_table_bytes(&curve);
+        assert_eq!(bytes[0], 1, "FSTM always 1");
+        for i in 0..10 {
+            let offset = 6 + i * 2;
+            assert_eq!(bytes[offset], 0);
+            assert_eq!(bytes[offset + 1], 0);
+        }
+    }
+
+    #[test]
+    fn encode_fan_table_bytes_max_step_value() {
+        let curve = CustomFanCurve {
+            fan_id: 1,
+            sensor_id: 4,
+            steps: [10; 10],
+        };
+        let bytes = encode_fan_table_bytes(&curve);
+        for i in 0..10 {
+            let offset = 6 + i * 2;
+            let value = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
+            assert_eq!(value, 10);
+        }
+    }
+
+    // -- validate_custom_curve -----------------------------------------------
+
+    #[test]
+    fn validate_custom_curve_llt_v2_minimum() {
+        let curve = CustomFanCurve {
+            fan_id: 0,
+            sensor_id: 3,
+            steps: [1, 1, 1, 1, 1, 1, 1, 1, 3, 5],
+        };
+        assert!(validate_custom_curve(&curve).is_ok());
+    }
+
+    #[test]
+    fn validate_custom_curve_all_max() {
+        let curve = CustomFanCurve {
+            fan_id: 0,
+            sensor_id: 3,
+            steps: [10; 10],
+        };
+        assert!(validate_custom_curve(&curve).is_ok());
+    }
+
+    #[test]
+    fn validate_custom_curve_ascending() {
+        let curve = CustomFanCurve {
+            fan_id: 0,
+            sensor_id: 3,
+            steps: [0, 1, 2, 3, 4, 5, 6, 7, 8, 10],
+        };
+        assert!(validate_custom_curve(&curve).is_ok());
+    }
+
+    #[test]
+    fn validate_custom_curve_flat_then_ramp() {
+        let curve = CustomFanCurve {
+            fan_id: 0,
+            sensor_id: 3,
+            steps: [0, 0, 0, 0, 0, 0, 0, 0, 5, 10],
+        };
+        assert!(validate_custom_curve(&curve).is_ok());
+    }
+
+    #[test]
+    fn validate_custom_curve_step_exceeds_max() {
+        let curve = CustomFanCurve {
+            fan_id: 0,
+            sensor_id: 3,
+            steps: [1, 1, 1, 1, 1, 1, 1, 1, 3, 11],
+        };
+        let err = validate_custom_curve(&curve).unwrap_err();
+        assert!(err.to_string().contains("exceeds maximum"));
+    }
+
+    #[test]
+    fn validate_custom_curve_decreasing_steps() {
+        let curve = CustomFanCurve {
+            fan_id: 0,
+            sensor_id: 3,
+            steps: [5, 4, 3, 2, 1, 1, 1, 1, 3, 5],
+        };
+        let err = validate_custom_curve(&curve).unwrap_err();
+        assert!(err.to_string().contains("non-decreasing"));
+    }
+
+    #[test]
+    fn validate_custom_curve_step8_too_low() {
+        let curve = CustomFanCurve {
+            fan_id: 0,
+            sensor_id: 3,
+            steps: [0, 0, 0, 0, 0, 0, 0, 0, 2, 5],
+        };
+        let err = validate_custom_curve(&curve).unwrap_err();
+        assert!(err.to_string().contains("step 8"));
+    }
+
+    #[test]
+    fn validate_custom_curve_step9_too_low() {
+        let curve = CustomFanCurve {
+            fan_id: 0,
+            sensor_id: 3,
+            steps: [0, 0, 0, 0, 0, 0, 0, 0, 3, 4],
+        };
+        let err = validate_custom_curve(&curve).unwrap_err();
+        assert!(err.to_string().contains("step 9"));
+    }
+
+    #[test]
+    fn validate_custom_curve_single_decrease_at_end() {
+        let curve = CustomFanCurve {
+            fan_id: 0,
+            sensor_id: 3,
+            steps: [1, 2, 3, 4, 5, 6, 7, 8, 10, 9],
+        };
+        let err = validate_custom_curve(&curve).unwrap_err();
+        assert!(err.to_string().contains("non-decreasing"));
+    }
+
+    // -- format_ps_byte_array ------------------------------------------------
+
+    #[test]
+    fn format_ps_byte_array_simple() {
+        let bytes = [1u8, 0, 0, 0, 0, 0];
+        assert_eq!(format_ps_byte_array(&bytes), "@(1,0,0,0,0,0)");
+    }
+
+    #[test]
+    fn format_ps_byte_array_full_buffer() {
+        let curve = CustomFanCurve {
+            fan_id: 0,
+            sensor_id: 3,
+            steps: [1, 1, 1, 1, 1, 1, 1, 1, 3, 5],
+        };
+        let bytes = encode_fan_table_bytes(&curve);
+        let ps = format_ps_byte_array(&bytes);
+        assert!(ps.starts_with("@("));
+        assert!(ps.ends_with(')'));
+        // Should have 64 comma-separated values
+        let values: Vec<&str> = ps
+            .trim_start_matches("@(")
+            .trim_end_matches(')')
+            .split(',')
+            .collect();
+        assert_eq!(values.len(), 64);
     }
 
     // -- integration: full discover output ----------------------------------

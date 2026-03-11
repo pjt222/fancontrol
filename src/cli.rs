@@ -50,6 +50,43 @@ pub enum Commands {
         fan_id: Option<u32>,
     },
 
+    /// Set a custom fan curve (Lenovo only, requires Custom SmartFanMode)
+    SetCurve {
+        /// Fan ID (0 = CPU fan, 1 = GPU fan on V1 hardware)
+        #[arg(long)]
+        fan_id: u32,
+
+        /// Sensor ID (3 = CPU temp, 4 = GPU temp on V1 hardware)
+        #[arg(long)]
+        sensor_id: u32,
+
+        /// 10 comma-separated speed step indices (0–10 scale).
+        /// Each value indexes into the hardware's FanSpeeds array.
+        /// Example: "0,0,0,1,2,4,6,7,8,10"
+        #[arg(long, value_parser = parse_steps)]
+        steps: [u8; 10],
+    },
+
     /// Open the graphical fan control interface
     Gui,
+}
+
+/// Parse 10 comma-separated step values into a fixed-size array.
+fn parse_steps(s: &str) -> Result<[u8; 10], String> {
+    let values: Vec<u8> = s
+        .split(',')
+        .map(|v| {
+            v.trim()
+                .parse::<u8>()
+                .map_err(|e| format!("invalid step value '{}': {}", v.trim(), e))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if values.len() != 10 {
+        return Err(format!("expected 10 step values, got {}", values.len()));
+    }
+
+    values
+        .try_into()
+        .map_err(|_| "expected exactly 10 values".to_string())
 }

@@ -15,6 +15,7 @@ use log::info;
 use simplelog::{ConfigBuilder, LevelFilter, WriteLogger};
 
 use cli::{Cli, Commands};
+use fan::CustomFanCurve;
 use platform::{create_controller, FanController};
 
 // put id:"cli_parse", label:"Parse CLI Arguments", output:"cli_command.internal"
@@ -57,6 +58,11 @@ fn main() -> Result<()> {
                 Commands::Set { fan_id, pwm } => cmd_set(&*controller, &fan_id, pwm),
                 Commands::Monitor { interval } => cmd_monitor(&*controller, interval),
                 Commands::Table { fan_id } => cmd_table(&*controller, fan_id),
+                Commands::SetCurve {
+                    fan_id,
+                    sensor_id,
+                    steps,
+                } => cmd_set_curve(&*controller, fan_id, sensor_id, steps),
                 Commands::Gui => unreachable!(),
             }
         }
@@ -166,6 +172,32 @@ fn cmd_table(controller: &dyn FanController, filter_fan_id: Option<u32>) -> Resu
         }
         println!();
     }
+
+    Ok(())
+}
+
+fn cmd_set_curve(
+    controller: &dyn FanController,
+    fan_id: u32,
+    sensor_id: u32,
+    steps: [u8; 10],
+) -> Result<()> {
+    let curve = CustomFanCurve {
+        fan_id,
+        sensor_id,
+        steps,
+    };
+
+    controller.set_custom_curve(&curve)?;
+
+    println!(
+        "Custom fan curve set for fan {} sensor {}",
+        fan_id, sensor_id
+    );
+    println!("Steps: {:?}", steps);
+    println!();
+    println!("Note: Custom curves require SmartFanMode=Custom and are volatile");
+    println!("      (lost on reboot, sleep, or power mode change).");
 
     Ok(())
 }

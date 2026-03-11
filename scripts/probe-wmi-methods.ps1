@@ -24,7 +24,6 @@ Log "--- Fan_Get_FullSpeed() ---"
 try {
     $result = $fm.Fan_Get_FullSpeed()
     Log "  Status: $($result.Status)"
-    Log "  ReturnValue: $($result.ReturnValue)"
     Log "  All properties:"
     $result.Properties | ForEach-Object {
         Log "    $($_.Name) = $($_.Value)"
@@ -47,7 +46,6 @@ foreach ($pair in $pairs) {
     Log "--- Fan_Get_Table(FanID=$fid, SensorID=$sid) ---"
     try {
         $result = $fm.Fan_Get_Table($fid, $sid)
-        Log "  ReturnValue: $($result.ReturnValue)"
         Log "  All properties:"
         $result.Properties | ForEach-Object {
             $val = $_.Value
@@ -67,7 +65,6 @@ foreach ($fid in @(0, 1)) {
     Log "--- Fan_Get_MaxSpeed(Fan_ID=$fid) ---"
     try {
         $result = $fm.Fan_Get_MaxSpeed($fid)
-        Log "  ReturnValue: $($result.ReturnValue)"
         Log "  All properties:"
         $result.Properties | ForEach-Object {
             $val = $_.Value

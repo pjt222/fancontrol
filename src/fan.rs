@@ -50,6 +50,23 @@ pub struct Fan {
     pub full_speed_active: bool,
 }
 
+/// A user-defined custom fan curve to write to the EC via Fan_Set_Table.
+///
+/// The `steps` array contains 10 speed step indices (0–10 scale) that index
+/// into the hardware's FanSpeeds array from `LENOVO_FAN_TABLE_DATA`.
+/// For example, on an 82RG with FanSpeeds = [1600,1800,...,4800]:
+///   step index 0 → 1600 RPM, step index 9 → 4800 RPM.
+#[derive(Debug, Clone)]
+pub struct CustomFanCurve {
+    /// Fan identifier (0 = CPU fan, 1 = GPU fan on V1 hardware).
+    pub fan_id: u32,
+    /// Sensor identifier (3 = CPU temp, 4 = GPU temp on V1 hardware).
+    pub sensor_id: u32,
+    /// 10 speed step indices, each 0–10. These are indices into the
+    /// FanSpeeds array from LENOVO_FAN_TABLE_DATA, NOT RPM values.
+    pub steps: [u8; 10],
+}
+
 impl fmt::Display for Fan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let control_status = if self.controllable {
