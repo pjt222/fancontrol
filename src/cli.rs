@@ -11,6 +11,10 @@ pub struct Cli {
     #[arg(short, long, action = ArgAction::Count, global = true)]
     pub verbose: u8,
 
+    /// Output in JSON format (for list, get, table commands)
+    #[arg(long, global = true)]
+    pub json: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -69,6 +73,9 @@ pub enum Commands {
 
     /// Open the graphical fan control interface
     Gui,
+
+    /// Open the interactive terminal UI dashboard
+    Tui,
 }
 
 /// Parse 10 comma-separated step values into a fixed-size array.

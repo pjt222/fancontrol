@@ -35,13 +35,21 @@ pub trait FanController {
         ))
     }
 
+    // TODO: These SmartFanMode methods are only implemented by the Lenovo
+    // backend and have no callers on Linux. Investigate whether to:
+    //   1. Expose them via CLI/TUI commands (e.g. `fancontrol smart-fan-mode`)
+    //   2. Move them to a Lenovo-specific trait extension
+    //   3. Gate them behind #[cfg(target_os = "windows")]
+
     /// Read the current SmartFanMode (Lenovo-specific). Returns `None` on
     /// platforms that don't support it.
+    #[allow(dead_code)]
     fn get_smart_fan_mode(&self) -> Result<Option<u32>, FanControlError> {
         Ok(None)
     }
 
     /// Set SmartFanMode (Lenovo-specific). Default returns not-supported.
+    #[allow(dead_code)]
     fn set_smart_fan_mode(&self, _mode: u32) -> Result<(), FanControlError> {
         Err(FanControlError::Platform(
             "SmartFanMode not supported on this platform".to_string(),
