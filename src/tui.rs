@@ -79,14 +79,29 @@ impl App {
 }
 
 pub fn run() -> Result<()> {
-    // Set up terminal
-    enable_raw_mode()?;
-    io::stdout().execute(EnterAlternateScreen)?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-
+    // Initialize controller BEFORE entering raw mode so failures don't leave
+    // the terminal in a broken state.
     let controller = create_controller()?;
 
-    // Background poller
+    enable_raw_mode()?;
+    io::stdout().execute(EnterAlternateScreen)?;
+
+    let result = run_inner(controller);
+
+    // Always restore terminal, even on error.
+    disable_raw_mode()?;
+    io::stdout().execute(LeaveAlternateScreen)?;
+
+    result
+}
+
+fn run_inner(controller: Box<dyn crate::platform::FanController>) -> Result<()> {
+    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+
+    // Background poller with stop flag for clean shutdown.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_poller = stop.clone();
+
     let (tx, rx) = mpsc::channel::<PollMsg>();
     let poll_handle = thread::spawn(move || {
         let ctrl = match create_controller() {
@@ -96,7 +111,7 @@ pub fn run() -> Result<()> {
                 return;
             }
         };
-        loop {
+        while !stop_poller.load(std::sync::atomic::Ordering::Relaxed) {
             match ctrl.discover() {
                 Ok(fans) => {
                     if tx.send(PollMsg::FanData(fans)).is_err() {
@@ -109,7 +124,13 @@ pub fn run() -> Result<()> {
                     }
                 }
             }
-            thread::sleep(Duration::from_millis(1500));
+            // Sleep in short increments so the stop flag is checked promptly.
+            for _ in 0..15 {
+                if stop_poller.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
         }
     });
 
@@ -213,11 +234,9 @@ pub fn run() -> Result<()> {
         }
     }
 
-    // Cleanup
-    drop(rx); // Signal poller to stop
+    // Signal poller to stop and wait for it.
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let _ = poll_handle.join();
-    disable_raw_mode()?;
-    io::stdout().execute(LeaveAlternateScreen)?;
     Ok(())
 }
 

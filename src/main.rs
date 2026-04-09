@@ -141,15 +141,16 @@ fn cmd_table(
     // to the dedicated get_fan_curves() method.
     let fans = controller.discover()?;
 
+    let full_speed_active = fans.iter().any(|f| f.full_speed_active);
     let has_embedded_curves = fans.iter().any(|f| !f.curves.is_empty());
 
     let curves = if has_embedded_curves {
-        fans.iter()
-            .flat_map(|f| f.curves.clone())
-            .collect::<Vec<_>>()
+        fans.into_iter().flat_map(|f| f.curves).collect::<Vec<_>>()
     } else {
         controller.get_fan_curves()?
     };
+
+    let has_any_curves = !curves.is_empty();
 
     let filtered: Vec<_> = match filter_fan_id {
         Some(fid) => curves.into_iter().filter(|c| c.fan_id == fid).collect(),
@@ -161,12 +162,16 @@ fn cmd_table(
         return Ok(());
     }
 
-    if fans.iter().any(|f| f.full_speed_active) {
+    if full_speed_active {
         println!("** FULL SPEED MODE ACTIVE **\n");
     }
 
     if filtered.is_empty() {
-        println!("No fan curve data available on this platform.");
+        if has_any_curves {
+            println!("No fan curves found for the specified fan ID.");
+        } else {
+            println!("No fan curve data available on this platform.");
+        }
         return Ok(());
     }
 

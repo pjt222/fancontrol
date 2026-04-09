@@ -57,11 +57,8 @@ pub struct Fan {
 /// into the hardware's FanSpeeds array from `LENOVO_FAN_TABLE_DATA`.
 /// For example, on an 82RG with FanSpeeds = [1600,1800,...,4800]:
 ///   step index 0 → 1600 RPM, step index 9 → 4800 RPM.
-// TODO: Fields appear unused on Linux because CustomFanCurve is only consumed
-// by the Lenovo Windows backend (lenovo.rs). Investigate whether cfg-gating this
-// struct or moving it into the lenovo module would be cleaner than suppressing.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub struct CustomFanCurve {
     /// Fan identifier (0 = CPU fan, 1 = GPU fan on V1 hardware).
     pub fan_id: u32,
