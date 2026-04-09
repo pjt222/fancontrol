@@ -3,6 +3,7 @@ mod errors;
 mod fan;
 mod gui;
 mod platform;
+mod tui;
 
 use std::thread;
 use std::time::Duration;
@@ -12,6 +13,7 @@ use std::fs::File;
 use anyhow::Result;
 use clap::Parser;
 use log::info;
+use serde_json::json;
 use simplelog::{ConfigBuilder, LevelFilter, WriteLogger};
 
 use cli::{Cli, Commands};
@@ -48,29 +50,38 @@ fn main() -> Result<()> {
     }
     info!("fancontrol started (log level: {})", log_level);
 
+    let json_output = cli.json;
+
     match cli.command {
         Commands::Gui => gui::run(),
+        Commands::Tui => tui::run(),
         other => {
             let controller = create_controller()?;
             match other {
-                Commands::List => cmd_list(&*controller),
-                Commands::Get { fan_id } => cmd_get(&*controller, &fan_id),
+                Commands::List => cmd_list(&*controller, json_output),
+                Commands::Get { fan_id } => cmd_get(&*controller, &fan_id, json_output),
                 Commands::Set { fan_id, pwm } => cmd_set(&*controller, &fan_id, pwm),
                 Commands::Monitor { interval } => cmd_monitor(&*controller, interval),
-                Commands::Table { fan_id } => cmd_table(&*controller, fan_id),
+                Commands::Table { fan_id } => cmd_table(&*controller, fan_id, json_output),
                 Commands::SetCurve {
                     fan_id,
                     sensor_id,
                     steps,
                 } => cmd_set_curve(&*controller, fan_id, sensor_id, steps),
-                Commands::Gui => unreachable!(),
+                Commands::Gui | Commands::Tui => unreachable!(),
             }
         }
     }
 }
 
-fn cmd_list(controller: &dyn FanController) -> Result<()> {
+fn cmd_list(controller: &dyn FanController, json_output: bool) -> Result<()> {
     let fans = controller.discover()?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&fans)?);
+        return Ok(());
+    }
+
     if fans.is_empty() {
         println!("No fans detected.");
         return Ok(());
@@ -103,8 +114,14 @@ fn cmd_list(controller: &dyn FanController) -> Result<()> {
     Ok(())
 }
 
-fn cmd_get(controller: &dyn FanController, fan_id: &str) -> Result<()> {
+fn cmd_get(controller: &dyn FanController, fan_id: &str, json_output: bool) -> Result<()> {
     let rpm = controller.get_speed(fan_id)?;
+
+    if json_output {
+        println!("{}", json!({"fan_id": fan_id, "rpm": rpm}));
+        return Ok(());
+    }
+
     println!("{} RPM", rpm);
     Ok(())
 }
@@ -115,15 +132,16 @@ fn cmd_set(controller: &dyn FanController, fan_id: &str, pwm: u8) -> Result<()> 
     Ok(())
 }
 
-fn cmd_table(controller: &dyn FanController, filter_fan_id: Option<u32>) -> Result<()> {
+fn cmd_table(
+    controller: &dyn FanController,
+    filter_fan_id: Option<u32>,
+    json_output: bool,
+) -> Result<()> {
     // Prefer curves already attached to fans from discover(), falling back
     // to the dedicated get_fan_curves() method.
     let fans = controller.discover()?;
 
-    if fans.iter().any(|f| f.full_speed_active) {
-        println!("** FULL SPEED MODE ACTIVE **\n");
-    }
-
+    let full_speed_active = fans.iter().any(|f| f.full_speed_active);
     let has_embedded_curves = fans.iter().any(|f| !f.curves.is_empty());
 
     let curves = if has_embedded_curves {
@@ -132,18 +150,28 @@ fn cmd_table(controller: &dyn FanController, filter_fan_id: Option<u32>) -> Resu
         controller.get_fan_curves()?
     };
 
-    if curves.is_empty() {
-        println!("No fan curve data available on this platform.");
-        return Ok(());
-    }
+    let has_any_curves = !curves.is_empty();
 
     let filtered: Vec<_> = match filter_fan_id {
         Some(fid) => curves.into_iter().filter(|c| c.fan_id == fid).collect(),
         None => curves,
     };
 
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&filtered)?);
+        return Ok(());
+    }
+
+    if full_speed_active {
+        println!("** FULL SPEED MODE ACTIVE **\n");
+    }
+
     if filtered.is_empty() {
-        println!("No fan curves found for the specified fan ID.");
+        if has_any_curves {
+            println!("No fan curves found for the specified fan ID.");
+        } else {
+            println!("No fan curve data available on this platform.");
+        }
         return Ok(());
     }
 

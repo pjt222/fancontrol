@@ -37,11 +37,13 @@ pub trait FanController {
 
     /// Read the current SmartFanMode (Lenovo-specific). Returns `None` on
     /// platforms that don't support it.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     fn get_smart_fan_mode(&self) -> Result<Option<u32>, FanControlError> {
         Ok(None)
     }
 
     /// Set SmartFanMode (Lenovo-specific). Default returns not-supported.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     fn set_smart_fan_mode(&self, _mode: u32) -> Result<(), FanControlError> {
         Err(FanControlError::Platform(
             "SmartFanMode not supported on this platform".to_string(),

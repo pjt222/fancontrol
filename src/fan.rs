@@ -1,9 +1,10 @@
 // put id:"fan_structs", label:"Fan/FanCurve Data Structs", node_type:"database"
 
+use serde::Serialize;
 use std::fmt;
 
 /// A single temperature→RPM point in a fan curve.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FanCurvePoint {
     /// Temperature threshold in degrees Celsius.
     pub temperature: u32,
@@ -15,7 +16,7 @@ pub struct FanCurvePoint {
 ///
 /// Each curve binds one fan to one sensor. The EC takes the maximum speed
 /// demanded across all sensor curves for a given fan.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FanCurve {
     pub fan_id: u32,
     pub sensor_id: u32,
@@ -28,7 +29,7 @@ pub struct FanCurve {
 }
 
 /// Represents a single fan discovered on the system.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Fan {
     /// Unique identifier (e.g. "hwmon2/fan1" on Linux, WMI instance path on Windows)
     pub id: String,
@@ -57,6 +58,7 @@ pub struct Fan {
 /// For example, on an 82RG with FanSpeeds = [1600,1800,...,4800]:
 ///   step index 0 → 1600 RPM, step index 9 → 4800 RPM.
 #[derive(Debug, Clone)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub struct CustomFanCurve {
     /// Fan identifier (0 = CPU fan, 1 = GPU fan on V1 hardware).
     pub fan_id: u32,
