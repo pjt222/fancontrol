@@ -4,13 +4,48 @@
 
 A minimal cross-platform app to monitor and control fan speed on Linux and Windows.
 
+## Quickstart
+
+```bash
+# Install Rust (if not already installed)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Clone and build
+git clone https://github.com/pjt222/fancontrol.git
+cd fancontrol
+cargo build --release
+
+# Run (Linux — may need sudo for PWM write access)
+sudo ./target/release/fancontrol list
+
+# Run (Windows — needs Administrator for WMI access)
+.\target\release\fancontrol.exe list
+```
+
+### Quick commands
+
+```bash
+fancontrol list                    # Show all detected fans
+fancontrol get fan0                # Get fan0 speed in RPM
+fancontrol set fan0 128            # Set fan0 to 50% duty cycle
+fancontrol monitor                 # Live fan monitor (Ctrl+C to stop)
+fancontrol table                   # Display EC fan curve data
+fancontrol tui                     # Interactive terminal dashboard
+fancontrol gui                     # Graphical interface
+fancontrol list --json             # Machine-readable JSON output
+fancontrol set-curve --fan-id 0 --sensor-id 3 --steps "1,1,1,1,2,4,6,7,8,10"  # Custom fan curve (Lenovo)
+```
+
 ## Features
 
-- **CLI** with subcommands: `list`, `get`, `set`, `monitor`, `table`, `gui`
+- **CLI** with subcommands: `list`, `get`, `set`, `monitor`, `table`, `set-curve`, `tui`, `gui`
+- **JSON output** (`--json`) for `list`, `get`, and `table` commands
+- **TUI** (ratatui) interactive terminal dashboard with keyboard-driven PWM control
 - **GUI** (egui/eframe) with per-fan sliders, real-time polling, and fan curve display
+- **Custom fan curves** for Lenovo Legion via `Fan_Set_Table` with safety validation
 - **Linux**: sysfs/hwmon backend — reads `fan*_input`, writes `pwm*`
 - **Windows**: WMI backend — generic `Win32_Fan` (read-only) with Lenovo Legion vendor support
-- **Lenovo Legion**: full speed toggle, manual RPM control, EC fan table/curve display
+- **Lenovo Legion**: full speed toggle, manual RPM control, SmartFanMode, EC fan table/curve display
 
 ## Architecture Diagram
 
@@ -80,37 +115,58 @@ The binary will be at `target/x86_64-pc-windows-gnu/release/fancontrol.exe`.
 
 ### List fans
 
-```
-fancontrol list
+```bash
+fancontrol list              # Human-readable table
+fancontrol list --json       # JSON output
 ```
 
 ### Get fan speed
 
-```
+```bash
 fancontrol get <FAN_ID>
+fancontrol get fan0 --json   # {"fan_id":"fan0","rpm":2100}
 ```
 
 ### Set fan PWM
 
-```
-fancontrol set <FAN_ID> <PWM>
+```bash
+fancontrol set <FAN_ID> <PWM>   # PWM 0-255
 ```
 
 ### Monitor fans in real-time
 
-```
-fancontrol monitor [-i <SECONDS>]
+```bash
+fancontrol monitor [-i <SECONDS>]   # Default: 1s refresh
 ```
 
 ### Display EC fan curves
 
+```bash
+fancontrol table                 # All curves
+fancontrol table --fan-id 0      # CPU fan only
+fancontrol table --json          # JSON output
 ```
-fancontrol table [--fan-id <ID>]
+
+### Set custom fan curve (Lenovo only)
+
+```bash
+# 10 comma-separated speed step indices (0-10 scale)
+fancontrol set-curve --fan-id 0 --sensor-id 3 --steps "1,1,1,1,2,4,6,7,8,10"
 ```
+
+Steps index into the hardware's FanSpeeds array from `LENOVO_FAN_TABLE_DATA`. Safety validation enforces non-decreasing values and minimum thresholds at high temperatures. Requires Custom SmartFanMode (auto-switched). Curves are volatile (lost on reboot/sleep).
+
+### Interactive TUI dashboard
+
+```bash
+fancontrol tui
+```
+
+Keyboard controls: `j`/`k` select fan, `Enter` edit PWM, `h`/`l` adjust +/-5, `+`/`-` fine +/-1, `Home`/`End` min/max, `Esc` cancel, `q` quit.
 
 ### Open the GUI
 
-```
+```bash
 fancontrol gui
 ```
 
@@ -118,7 +174,7 @@ fancontrol gui
 
 Use `-v` flags to increase log verbosity (written to `fancontrol.log`):
 
-```
+```bash
 fancontrol -v list       # Info level
 fancontrol -vv list      # Debug level
 fancontrol -vvv list     # Trace level
@@ -157,7 +213,8 @@ Default log level is Warn.
 - Linux backend requires root or appropriate permissions for PWM write access
 - Windows generic `Win32_Fan` is read-only — vendor-specific WMI is needed for control
 - Lenovo WMI `Fan_Get_Table` and `Fan_Get_MaxSpeed` return empty data on some firmware
-- Custom fan curve writing (`Fan_Set_Table`) is not yet implemented due to unknown byte format
+- `Fan_Set_Table` call succeeds but behavioral effect is unverified at idle temperatures (needs load test above 58°C)
+- Custom curves are volatile — lost on reboot, sleep/wake, or power mode change (Fn+Q)
 
 ## Acknowledgments
 
