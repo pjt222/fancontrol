@@ -1,4 +1,5 @@
 mod cli;
+mod config;
 mod errors;
 mod fan;
 mod gui;
@@ -67,7 +68,8 @@ fn main() -> Result<()> {
                     fan_id,
                     sensor_id,
                     steps,
-                } => cmd_set_curve(&*controller, fan_id, sensor_id, steps),
+                    save,
+                } => cmd_set_curve(&*controller, fan_id, sensor_id, steps, save),
                 Commands::Gui | Commands::Tui => unreachable!(),
             }
         }
@@ -209,6 +211,7 @@ fn cmd_set_curve(
     fan_id: u32,
     sensor_id: u32,
     steps: [u8; 10],
+    save: bool,
 ) -> Result<()> {
     let curve = CustomFanCurve {
         fan_id,
@@ -223,9 +226,21 @@ fn cmd_set_curve(
         fan_id, sensor_id
     );
     println!("Steps: {:?}", steps);
-    println!();
-    println!("Note: Custom curves require SmartFanMode=Custom and are volatile");
-    println!("      (lost on reboot, sleep, or power mode change).");
+
+    if save {
+        let mut cfg = config::load_config();
+        // Replace any existing curve for the same fan+sensor, or add new.
+        cfg.custom_curves
+            .retain(|c| !(c.fan_id == fan_id && c.sensor_id == sensor_id));
+        cfg.custom_curves.push(curve);
+        config::save_config(&cfg)?;
+        println!("Saved to {}", config::config_path().display());
+    } else {
+        println!();
+        println!("Note: Custom curves require SmartFanMode=Custom and are volatile");
+        println!("      (lost on reboot, sleep, or power mode change).");
+        println!("      Use --save to persist to fancontrol.json.");
+    }
 
     Ok(())
 }

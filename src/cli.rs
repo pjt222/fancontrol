@@ -69,6 +69,10 @@ pub enum Commands {
         /// Example: "0,0,0,1,2,4,6,7,8,10"
         #[arg(long, value_parser = parse_steps)]
         steps: [u8; 10],
+
+        /// Save this curve to fancontrol.json for re-application on startup
+        #[arg(long)]
+        save: bool,
     },
 
     /// Open the graphical fan control interface
