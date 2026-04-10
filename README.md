@@ -1,8 +1,10 @@
 # fancontrol
 
-![CI](https://github.com/pjt222/fancontrol/actions/workflows/ci.yml/badge.svg)
+[![CI](https://github.com/pjt222/fancontrol/actions/workflows/ci.yml/badge.svg)](https://github.com/pjt222/fancontrol/actions/workflows/ci.yml)
 
-A minimal cross-platform app to monitor and control fan speed on Linux and Windows.
+Minimal cross-platform fan speed control — CLI, TUI dashboard, and GUI for Linux & Windows. Lenovo Legion fan curve support via WMI.
+
+**[Landing page](https://pjt222.github.io/fancontrol/)** · **[GitHub](https://github.com/pjt222/fancontrol)**
 
 ## Quickstart
 
@@ -33,19 +35,23 @@ fancontrol table                   # Display EC fan curve data
 fancontrol tui                     # Interactive terminal dashboard
 fancontrol gui                     # Graphical interface
 fancontrol list --json             # Machine-readable JSON output
-fancontrol set-curve --fan-id 0 --sensor-id 3 --steps "1,1,1,1,2,4,6,7,8,10"  # Custom fan curve (Lenovo)
+
+# Custom fan curve with config persistence (Lenovo)
+fancontrol set-curve --fan-id 0 --sensor-id 3 \
+  --steps "0,0,0,1,2,4,6,7,8,10" --save
 ```
 
 ## Features
 
 - **CLI** with subcommands: `list`, `get`, `set`, `monitor`, `table`, `set-curve`, `tui`, `gui`
 - **JSON output** (`--json`) for `list`, `get`, and `table` commands
-- **TUI** (ratatui) interactive terminal dashboard with keyboard-driven PWM control
-- **GUI** (egui/eframe) with per-fan sliders, real-time polling, and fan curve display
+- **TUI dashboard** (ratatui) with viridis color scheme, real-time fan/temp display, interactive curve editor, and keyboard-driven controls
+- **GUI** (egui/eframe) with per-fan sliders, curve editor, SmartFanMode display, and real-time polling
+- **Config persistence** — save custom curves to `fancontrol.json` with `--save`; auto-reapplied on startup
 - **Custom fan curves** for Lenovo Legion via `Fan_Set_Table` with safety validation
 - **Linux**: sysfs/hwmon backend — reads `fan*_input`, writes `pwm*`
 - **Windows**: WMI backend — generic `Win32_Fan` (read-only) with Lenovo Legion vendor support
-- **Lenovo Legion**: full speed toggle, manual RPM control, SmartFanMode, EC fan table/curve display
+- **Lenovo Legion**: full speed toggle, SmartFanMode (Quiet/Balanced/Performance/Custom), EC fan curve display and editing
 
 ## Architecture Diagram
 
@@ -151,10 +157,13 @@ fancontrol table --json          # JSON output
 
 ```bash
 # 10 comma-separated speed step indices (0-10 scale)
-fancontrol set-curve --fan-id 0 --sensor-id 3 --steps "1,1,1,1,2,4,6,7,8,10"
+fancontrol set-curve --fan-id 0 --sensor-id 3 --steps "0,0,0,1,2,4,6,7,8,10"
+
+# Save to config for automatic re-application on startup
+fancontrol set-curve --fan-id 0 --sensor-id 3 --steps "0,0,0,1,2,4,6,7,8,10" --save
 ```
 
-Steps index into the hardware's FanSpeeds array from `LENOVO_FAN_TABLE_DATA`. Safety validation enforces non-decreasing values and minimum thresholds at high temperatures. Requires Custom SmartFanMode (auto-switched). Curves are volatile (lost on reboot/sleep).
+Steps index into the hardware's FanSpeeds array from `LENOVO_FAN_TABLE_DATA`. Safety validation enforces non-decreasing values and minimum thresholds at high temperatures. Requires Custom SmartFanMode (auto-switched).
 
 ### Interactive TUI dashboard
 
@@ -162,7 +171,11 @@ Steps index into the hardware's FanSpeeds array from `LENOVO_FAN_TABLE_DATA`. Sa
 fancontrol tui
 ```
 
-Keyboard controls: `j`/`k` select fan, `Enter` edit PWM, `h`/`l` adjust +/-5, `+`/`-` fine +/-1, `Home`/`End` min/max, `Esc` cancel, `q` quit.
+Viridis-themed terminal dashboard with real-time fan speeds, temperature readings, and an interactive curve editor.
+
+**Fan select mode**: `j`/`k` select fan, `Tab`/`Shift+Tab` cycle sensor, `Enter` edit curve, `f` toggle full speed, `a` apply curve, `s` save to config, `r` reset to BIOS, `q` quit.
+
+**Curve edit mode**: `j`/`k` select step, `h`/`l` adjust value +/-1, `Enter`/`a` apply and exit, `s` apply and save, `Esc` revert changes.
 
 ### Open the GUI
 
@@ -214,7 +227,7 @@ Default log level is Warn.
 - Windows generic `Win32_Fan` is read-only — vendor-specific WMI is needed for control
 - Lenovo WMI `Fan_Get_Table` and `Fan_Get_MaxSpeed` return empty data on some firmware
 - `Fan_Set_Table` call succeeds but behavioral effect is unverified at idle temperatures (needs load test above 58°C)
-- Custom curves are volatile — lost on reboot, sleep/wake, or power mode change (Fn+Q)
+- Custom curves are volatile at the hardware level (lost on reboot, sleep/wake, or Fn+Q power mode change) — use `--save` or the TUI `s` key to persist curves for automatic re-application on startup
 
 ## Acknowledgments
 
