@@ -953,7 +953,7 @@ fn draw_fan_list(f: &mut Frame, app: &App, area: Rect) {
 
     for (i, fan) in app.fans.iter().enumerate() {
         let is_selected = i == app.selected_fan;
-        let marker = if is_selected { "\u{25b6}" } else { " " };
+        let marker = if is_selected { "\u{25ba}" } else { " " };
 
         // Color RPM by speed relative to fan's range
         let (min_rpm, max_rpm) = (
