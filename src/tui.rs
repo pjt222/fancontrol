@@ -78,7 +78,8 @@ fn viridis_temp(temp: u32) -> Color {
 }
 
 // Viridis accent colors for UI chrome
-const VIRIDIS_BORDER: Color = Color::Rgb(68, 1, 84);       // step 0 — deep purple
+const VIRIDIS_BORDER: Color = Color::Rgb(68, 1, 84);       // step 0 — deep purple (borders only)
+const VIRIDIS_CHROME: Color = Color::Rgb(128, 128, 128);   // grey50 — titles and labels
 const VIRIDIS_TITLE: Color = Color::Rgb(31, 158, 137);     // step 5 — teal-green
 const VIRIDIS_SELECTED: Color = Color::Rgb(253, 231, 37);  // step 10 — bright yellow
 const VIRIDIS_CUSTOM: Color = Color::Rgb(159, 218, 58);    // step 8 — yellow-green
@@ -895,6 +896,7 @@ fn draw_title(f: &mut Frame, app: &App, area: Rect) {
     let title = Block::bordered()
         .title(" Fan Control TUI ")
         .title_alignment(Alignment::Center)
+        .title_style(Style::default().fg(VIRIDIS_CHROME))
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(VIRIDIS_BORDER));
     let mode_color = match app.smart_fan_mode {
@@ -923,6 +925,7 @@ fn draw_fan_list(f: &mut Frame, app: &App, area: Rect) {
             .block(
                 Block::bordered()
                     .title(" Fans ")
+                    .title_style(Style::default().fg(VIRIDIS_CHROME))
                     .border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(VIRIDIS_BORDER)),
             );
@@ -1014,6 +1017,7 @@ fn draw_fan_list(f: &mut Frame, app: &App, area: Rect) {
         .block(
             Block::bordered()
                 .title(" Fans ")
+                .title_style(Style::default().fg(VIRIDIS_CHROME))
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(VIRIDIS_BORDER)),
         )
@@ -1031,6 +1035,7 @@ fn draw_curve_editor(f: &mut Frame, app: &App, area: Rect) {
                 .block(
                     Block::bordered()
                         .title(" Curve Editor ")
+                        .title_style(Style::default().fg(VIRIDIS_CHROME))
                         .border_type(BorderType::Rounded)
                         .border_style(Style::default().fg(VIRIDIS_BORDER)),
                 );
@@ -1047,6 +1052,7 @@ fn draw_curve_editor(f: &mut Frame, app: &App, area: Rect) {
                 .block(
                     Block::bordered()
                         .title(" Curve Editor ")
+                        .title_style(Style::default().fg(VIRIDIS_CHROME))
                         .border_type(BorderType::Rounded)
                         .border_style(Style::default().fg(VIRIDIS_BORDER)),
                 );
@@ -1232,6 +1238,7 @@ fn draw_curve_editor(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::bordered()
         .title(format!(" Curve: {header_text} "))
         .title_alignment(Alignment::Left)
+        .title_style(Style::default().fg(VIRIDIS_CHROME))
         .border_type(BorderType::Rounded)
         .border_style(border_style);
 
@@ -1342,6 +1349,7 @@ fn draw_info_panel(f: &mut Frame, lines: Vec<Line<'static>>, area: Rect) {
     let info = Paragraph::new(lines).block(
         Block::bordered()
             .title(" Info ")
+            .title_style(Style::default().fg(VIRIDIS_CHROME))
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(VIRIDIS_BORDER)),
     );
@@ -1404,6 +1412,7 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 " Keys "
             })
+            .title_style(Style::default().fg(VIRIDIS_CHROME))
             .border_type(BorderType::Rounded)
             .border_style(if is_editing {
                 Style::default().fg(VIRIDIS_SELECTED)
@@ -1426,6 +1435,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let status = Paragraph::new(Span::styled(&app.status, status_style)).block(
         Block::bordered()
             .title(" Status ")
+            .title_style(Style::default().fg(VIRIDIS_CHROME))
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(VIRIDIS_BORDER)),
     );
