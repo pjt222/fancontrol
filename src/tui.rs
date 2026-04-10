@@ -25,17 +25,17 @@ use crate::platform::create_controller;
 /// 11-point viridis gradient (steps 0–10) as RGB tuples.
 /// Canonical matplotlib viridis colormap sampled at t = 0.0, 0.1, ..., 1.0.
 const VIRIDIS: [(u8, u8, u8); 11] = [
-    ( 68,   1,  84),  //  0  #440154  deep indigo-violet
-    ( 72,  37, 118),  //  1  #482576  dark purple
-    ( 65,  68, 135),  //  2  #414487  muted blue-purple
-    ( 53,  95, 141),  //  3  #355f8d  steel blue
-    ( 38, 130, 142),  //  4  #26828e  teal-blue
-    ( 31, 158, 137),  //  5  #1f9e89  teal-green (midpoint)
-    ( 53, 183, 121),  //  6  #35b779  sea green
-    ( 94, 201,  98),  //  7  #5ec962  bright green
-    (159, 218,  58),  //  8  #9fda3a  yellow-green
-    (216, 226,  25),  //  9  #d8e219  chartreuse-yellow
-    (253, 231,  37),  // 10  #fde725  bright yellow
+    (68, 1, 84),    //  0  #440154  deep indigo-violet
+    (72, 37, 118),  //  1  #482576  dark purple
+    (65, 68, 135),  //  2  #414487  muted blue-purple
+    (53, 95, 141),  //  3  #355f8d  steel blue
+    (38, 130, 142), //  4  #26828e  teal-blue
+    (31, 158, 137), //  5  #1f9e89  teal-green (midpoint)
+    (53, 183, 121), //  6  #35b779  sea green
+    (94, 201, 98),  //  7  #5ec962  bright green
+    (159, 218, 58), //  8  #9fda3a  yellow-green
+    (216, 226, 25), //  9  #d8e219  chartreuse-yellow
+    (253, 231, 37), // 10  #fde725  bright yellow
 ];
 
 /// Interpolate viridis color for a value in [0.0, 1.0].
@@ -78,13 +78,13 @@ fn viridis_temp(temp: u32) -> Color {
 }
 
 // Viridis accent colors for UI chrome
-const VIRIDIS_BORDER: Color = Color::Rgb(68, 1, 84);       // step 0 — deep purple (borders only)
-const VIRIDIS_CHROME: Color = Color::Rgb(128, 128, 128);   // grey50 — titles and labels
-const VIRIDIS_TITLE: Color = Color::Rgb(31, 158, 137);     // step 5 — teal-green
-const VIRIDIS_SELECTED: Color = Color::Rgb(253, 231, 37);  // step 10 — bright yellow
-const VIRIDIS_CUSTOM: Color = Color::Rgb(159, 218, 58);    // step 8 — yellow-green
-const VIRIDIS_BIOS: Color = Color::Rgb(53, 95, 141);       // step 3 — steel blue
-const VIRIDIS_HOT: Color = Color::Rgb(253, 231, 37);       // step 10 — bright yellow
+const VIRIDIS_BORDER: Color = Color::Rgb(68, 1, 84); // step 0 — deep purple (borders only)
+const VIRIDIS_CHROME: Color = Color::Rgb(128, 128, 128); // grey50 — titles and labels
+const VIRIDIS_TITLE: Color = Color::Rgb(31, 158, 137); // step 5 — teal-green
+const VIRIDIS_SELECTED: Color = Color::Rgb(253, 231, 37); // step 10 — bright yellow
+const VIRIDIS_CUSTOM: Color = Color::Rgb(159, 218, 58); // step 8 — yellow-green
+const VIRIDIS_BIOS: Color = Color::Rgb(53, 95, 141); // step 3 — steel blue
+const VIRIDIS_HOT: Color = Color::Rgb(253, 231, 37); // step 10 — bright yellow
 
 // ---------------------------------------------------------------------------
 // Protocol: messages between UI thread and background poller
@@ -321,10 +321,7 @@ impl App {
                 if sensor_ids.len() <= 1 {
                     return;
                 }
-                let idx = self
-                    .selected_sensor_idx
-                    .entry(fan.id.clone())
-                    .or_insert(0);
+                let idx = self.selected_sensor_idx.entry(fan.id.clone()).or_insert(0);
                 if forward {
                     *idx = (*idx + 1) % sensor_ids.len();
                 } else if *idx == 0 {
@@ -453,7 +450,10 @@ fn run_inner() -> Result<()> {
         // Load saved curves from config and apply on startup.
         let saved_config = config::load_config();
         for curve in &saved_config.custom_curves {
-            info!("TUI poller: applying saved curve fan{}->sensor{}", curve.fan_id, curve.sensor_id);
+            info!(
+                "TUI poller: applying saved curve fan{}->sensor{}",
+                curve.fan_id, curve.sensor_id
+            );
             match ctrl.set_custom_curve(curve) {
                 Ok(()) => {
                     held_curves.push(curve.clone());
@@ -513,8 +513,7 @@ fn run_inner() -> Result<()> {
                             Ok(()) => {
                                 // Upsert in held_curves
                                 held_curves.retain(|c| {
-                                    !(c.fan_id == curve.fan_id
-                                        && c.sensor_id == curve.sensor_id)
+                                    !(c.fan_id == curve.fan_id && c.sensor_id == curve.sensor_id)
                                 });
                                 held_curves.push(curve.clone());
                                 let _ = tx.send(PollMsg::CustomCurveSet {
@@ -648,7 +647,12 @@ fn run_inner() -> Result<()> {
 // Input handling
 // ---------------------------------------------------------------------------
 
-fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers, cmd_tx: &mpsc::Sender<CmdMsg>) {
+fn handle_key(
+    app: &mut App,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    cmd_tx: &mpsc::Sender<CmdMsg>,
+) {
     // Ctrl+C always quits.
     if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
         app.quit = true;
@@ -711,7 +715,10 @@ fn handle_fan_select(app: &mut App, code: KeyCode, cmd_tx: &mpsc::Sender<CmdMsg>
             // Also include the just-applied curve.
             let mut all_curves = curves;
             if let Some(current) = app.build_custom_curve() {
-                if !all_curves.iter().any(|c| c.fan_id == current.fan_id && c.sensor_id == current.sensor_id) {
+                if !all_curves
+                    .iter()
+                    .any(|c| c.fan_id == current.fan_id && c.sensor_id == current.sensor_id)
+                {
                     all_curves.push(current);
                 }
             }
@@ -745,12 +752,7 @@ fn handle_fan_select(app: &mut App, code: KeyCode, cmd_tx: &mpsc::Sender<CmdMsg>
     }
 }
 
-fn handle_curve_edit(
-    app: &mut App,
-    code: KeyCode,
-    step_idx: usize,
-    cmd_tx: &mpsc::Sender<CmdMsg>,
-) {
+fn handle_curve_edit(app: &mut App, code: KeyCode, step_idx: usize, cmd_tx: &mpsc::Sender<CmdMsg>) {
     match code {
         KeyCode::Esc | KeyCode::Char('q') => {
             // Revert to snapshot and return to fan select.
@@ -809,7 +811,10 @@ fn handle_curve_edit(
             let curves = app.held_curves();
             let mut all_curves = curves;
             if let Some(current) = app.build_custom_curve() {
-                if !all_curves.iter().any(|c| c.fan_id == current.fan_id && c.sensor_id == current.sensor_id) {
+                if !all_curves
+                    .iter()
+                    .any(|c| c.fan_id == current.fan_id && c.sensor_id == current.sensor_id)
+                {
                     all_curves.push(current);
                 }
             }
@@ -875,9 +880,9 @@ fn draw_ui(f: &mut Frame, app: &App) {
 
     let layout = Layout::vertical([
         Constraint::Length(3),               // Title
-        Constraint::Length(fan_list_height),  // Fan list (compact, capped)
+        Constraint::Length(fan_list_height), // Fan list (compact, capped)
         Constraint::Min(6),                  // Curve editor (flex)
-        Constraint::Length(info_height),      // Info panel (capped)
+        Constraint::Length(info_height),     // Info panel (capped)
         Constraint::Length(5),               // Help
         Constraint::Length(3),               // Status bar
     ])
@@ -900,10 +905,10 @@ fn draw_title(f: &mut Frame, app: &App, area: Rect) {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(VIRIDIS_BORDER));
     let mode_color = match app.smart_fan_mode {
-        Some(255) => VIRIDIS_CUSTOM,  // Custom — lime
-        Some(1) => VIRIDIS_BIOS,      // Quiet — cool blue
-        Some(3) => VIRIDIS_HOT,       // Performance — yellow
-        _ => VIRIDIS_TITLE,           // Balanced/N/A — teal
+        Some(255) => VIRIDIS_CUSTOM, // Custom — lime
+        Some(1) => VIRIDIS_BIOS,     // Quiet — cool blue
+        Some(3) => VIRIDIS_HOT,      // Performance — yellow
+        _ => VIRIDIS_TITLE,          // Balanced/N/A — teal
     };
     let title_text = Paragraph::new(Line::from(vec![
         Span::styled("Fan Control", Style::default().fg(VIRIDIS_TITLE).bold()),
@@ -956,10 +961,7 @@ fn draw_fan_list(f: &mut Frame, app: &App, area: Rect) {
         let marker = if is_selected { "\u{25ba}" } else { " " };
 
         // Color RPM by speed relative to fan's range
-        let (min_rpm, max_rpm) = (
-            fan.min_rpm.unwrap_or(1600),
-            fan.max_rpm.unwrap_or(5400),
-        );
+        let (min_rpm, max_rpm) = (fan.min_rpm.unwrap_or(1600), fan.max_rpm.unwrap_or(5400));
         let rpm_color = viridis_rpm(fan.speed_rpm, min_rpm, max_rpm);
         let rpm_text = Span::styled(
             format!("{} RPM", fan.speed_rpm),
@@ -1066,11 +1068,7 @@ fn draw_curve_editor(f: &mut Frame, app: &App, area: Rect) {
 
     // Build header: fan label, sensor, navigation hint
     let sensor_ids = app.fan_sensor_ids.get(&fan.id);
-    let sensor_idx = app
-        .selected_sensor_idx
-        .get(&fan.id)
-        .copied()
-        .unwrap_or(0);
+    let sensor_idx = app.selected_sensor_idx.get(&fan.id).copied().unwrap_or(0);
     let sensor_count = sensor_ids.map(|s| s.len()).unwrap_or(0);
     let active_tag = ec_curve
         .map(|c| if c.active { "Active" } else { "Inactive" })
@@ -1108,13 +1106,10 @@ fn draw_curve_editor(f: &mut Frame, app: &App, area: Rect) {
     )]));
 
     if let (Some(ec), Some(ed)) = (ec_curve, editor) {
-        // Compute EC default step indices by identity mapping (step i = index i)
-        let default_steps: [u8; 10] = std::array::from_fn(|i| i as u8);
-
         for i in 0..10 {
             let temp = ec.points.get(i).map(|p| p.temperature).unwrap_or(0);
             let step_val = ed.steps[i];
-            let default_val = default_steps[i];
+            let default_val = i as u8;
 
             // Approximate RPM from step value using EC curve points
             let rpm = if (step_val as usize) < ec.points.len() {
@@ -1184,10 +1179,7 @@ fn draw_curve_editor(f: &mut Frame, app: &App, area: Rect) {
 
             // Build the line with mixed spans for viridis gradient bar
             let mut spans: Vec<Span> = Vec::new();
-            spans.push(Span::styled(
-                format!(" {:>1}    ", i),
-                text_style,
-            ));
+            spans.push(Span::styled(format!(" {:>1}    ", i), text_style));
             spans.push(Span::styled(
                 format!("{:>3}C", temp),
                 Style::default().fg(temp_color),
@@ -1197,10 +1189,16 @@ fn draw_curve_editor(f: &mut Frame, app: &App, area: Rect) {
                 text_style,
             ));
             spans.extend(bar_spans);
-            spans.push(Span::styled(safety.to_string(), Style::default().fg(Color::Red)));
+            spans.push(Span::styled(
+                safety.to_string(),
+                Style::default().fg(Color::Red),
+            ));
 
             if !default_hint.is_empty() {
-                spans.push(Span::styled(default_hint, Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(
+                    default_hint,
+                    Style::default().fg(Color::DarkGray),
+                ));
             }
 
             lines.push(Line::from(spans));
@@ -1293,40 +1291,29 @@ fn build_info_lines(app: &App) -> Vec<Line<'static>> {
         unique_sensors.dedup();
         if unique_sensors.len() > 1 {
             lines.push(Line::from(vec![
-                Span::styled(
-                    fan.label.to_string(),
-                    Style::default().fg(VIRIDIS_CUSTOM),
-                ),
+                Span::styled(fan.label.to_string(), Style::default().fg(VIRIDIS_CUSTOM)),
                 Span::raw(" responds to multiple sensors (EC uses max)"),
             ]));
         }
     }
 
     // Mode-aware status line
-    let held_count = app
-        .curve_editors
-        .values()
-        .filter(|e| e.held)
-        .count();
+    let held_count = app.curve_editors.values().filter(|e| e.held).count();
 
     match app.smart_fan_mode {
         Some(255) => {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("Custom mode active -- {} curve(s) held", held_count),
-                    Style::default().fg(VIRIDIS_CUSTOM).bold(),
-                ),
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                format!("Custom mode active -- {} curve(s) held", held_count),
+                Style::default().fg(VIRIDIS_CUSTOM).bold(),
+            )]));
         }
         Some(mode) => {
             let label = smart_fan_mode_label(Some(mode));
             if held_count > 0 {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("{label} mode -- {held_count} curve(s) held, will re-apply"),
-                        Style::default().fg(VIRIDIS_CUSTOM),
-                    ),
-                ]));
+                lines.push(Line::from(vec![Span::styled(
+                    format!("{label} mode -- {held_count} curve(s) held, will re-apply"),
+                    Style::default().fg(VIRIDIS_CUSTOM),
+                )]));
             } else {
                 lines.push(Line::from(vec![
                     Span::styled(format!("{label} mode"), Style::default().fg(VIRIDIS_BIOS)),
@@ -1359,7 +1346,11 @@ fn draw_info_panel(f: &mut Frame, lines: Vec<Line<'static>>, area: Rect) {
 fn draw_help(f: &mut Frame, app: &App, area: Rect) {
     let is_editing = matches!(app.mode, Mode::CurveEdit { .. });
 
-    let key_color = if is_editing { VIRIDIS_SELECTED } else { VIRIDIS_TITLE };
+    let key_color = if is_editing {
+        VIRIDIS_SELECTED
+    } else {
+        VIRIDIS_TITLE
+    };
 
     let help_text = if is_editing {
         vec![
@@ -1407,11 +1398,7 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
 
     let help = Paragraph::new(help_text).block(
         Block::bordered()
-            .title(if is_editing {
-                " Edit Curve "
-            } else {
-                " Keys "
-            })
+            .title(if is_editing { " Edit Curve " } else { " Keys " })
             .title_style(Style::default().fg(VIRIDIS_CHROME))
             .border_type(BorderType::Rounded)
             .border_style(if is_editing {

@@ -14,7 +14,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       <div class="placeholder">
         <span style="color: var(--v-5)">Fan Control TUI</span> &mdash; SmartFanMode: Balanced
 
-        &gt; CPU Fan    2100 RPM    BIOS auto
+        \u25ba CPU Fan    2100 RPM    BIOS auto
           GPU Fan    1800 RPM    BIOS auto
 
         Curve: CPU Fan &gt; Sensor 3 (Active)
