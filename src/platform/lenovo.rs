@@ -455,14 +455,15 @@ impl FanController for LenovoFanController {
     fn set_custom_curve(&self, curve: &CustomFanCurve) -> Result<(), FanControlError> {
         validate_custom_curve(curve)?;
 
-        // Ensure SmartFanMode is set to Custom (3) — required for Fan_Set_Table.
+        // Ensure SmartFanMode is set to Custom (255) — required for Fan_Set_Table.
+        // Mode values: 1=Quiet, 2=Balanced, 3=Performance, 255=Custom.
         match self.get_smart_fan_mode()? {
-            Some(3) => {
-                debug!("SmartFanMode already Custom (3)");
+            Some(255) => {
+                debug!("SmartFanMode already Custom (255)");
             }
             Some(mode) => {
-                warn!("SmartFanMode is {mode}, switching to Custom (3) for fan curve write");
-                self.set_smart_fan_mode(3)?;
+                warn!("SmartFanMode is {mode}, switching to Custom (255) for fan curve write");
+                self.set_smart_fan_mode(255)?;
             }
             None => {
                 warn!("Could not read SmartFanMode, attempting Fan_Set_Table anyway");

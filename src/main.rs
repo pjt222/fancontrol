@@ -1,4 +1,5 @@
 mod cli;
+mod config;
 mod errors;
 mod fan;
 mod gui;
@@ -53,8 +54,18 @@ fn main() -> Result<()> {
     let json_output = cli.json;
 
     match cli.command {
-        Commands::Gui => gui::run(),
-        Commands::Tui => tui::run(),
+        Commands::Gui => {
+            if json_output {
+                eprintln!("Warning: --json flag has no effect with the gui subcommand");
+            }
+            gui::run()
+        }
+        Commands::Tui => {
+            if json_output {
+                eprintln!("Warning: --json flag has no effect with the tui subcommand");
+            }
+            tui::run()
+        }
         other => {
             let controller = create_controller()?;
             match other {
@@ -67,7 +78,8 @@ fn main() -> Result<()> {
                     fan_id,
                     sensor_id,
                     steps,
-                } => cmd_set_curve(&*controller, fan_id, sensor_id, steps),
+                    save,
+                } => cmd_set_curve(&*controller, fan_id, sensor_id, steps, save),
                 Commands::Gui | Commands::Tui => unreachable!(),
             }
         }
@@ -209,6 +221,7 @@ fn cmd_set_curve(
     fan_id: u32,
     sensor_id: u32,
     steps: [u8; 10],
+    save: bool,
 ) -> Result<()> {
     let curve = CustomFanCurve {
         fan_id,
@@ -223,9 +236,21 @@ fn cmd_set_curve(
         fan_id, sensor_id
     );
     println!("Steps: {:?}", steps);
-    println!();
-    println!("Note: Custom curves require SmartFanMode=Custom and are volatile");
-    println!("      (lost on reboot, sleep, or power mode change).");
+
+    if save {
+        let mut cfg = config::load_config();
+        // Upsert: replace existing curve for this fan+sensor, or add new
+        cfg.custom_curves
+            .retain(|c| !(c.fan_id == fan_id && c.sensor_id == sensor_id));
+        cfg.custom_curves.push(curve);
+        config::save_config(&cfg)?;
+        println!("Saved to {}", config::config_path().display());
+    } else {
+        println!();
+        println!("Note: Custom curves require SmartFanMode=Custom and are volatile");
+        println!("      (lost on reboot, sleep, or power mode change).");
+        println!("      Use --save to persist to config file.");
+    }
 
     Ok(())
 }
