@@ -382,10 +382,18 @@ fn enforce_non_decreasing(steps: &mut [u8; 10], idx: usize) {
 
 /// Enforce safety minimums for high-temperature steps.
 ///
+/// Floors match LenovoLegionToolkit's GodMode V1 table
+/// `[0,0,0,0,0,0,0,1,3,5]` — steps 0–6 may stay at 0, so the fans can idle
+/// off, while steps 7, 8 and 9 carry floors of 1, 3 and 5.
+///
 /// Only propagates upward (step 8 clamp raises step 9 if needed; step 9 clamp
 /// raises nothing). Does NOT propagate backward into lower steps — a low value
-/// on step 7 is valid even if step 8 is at its minimum.
+/// on step 7 stays valid with step 8 at its minimum, since step 7's floor of 1
+/// sits below step 8's floor of 3.
 fn enforce_safety_minimums(steps: &mut [u8; 10]) {
+    if steps[7] < 1 {
+        steps[7] = 1;
+    }
     if steps[8] < 3 {
         steps[8] = 3;
     }
@@ -449,12 +457,17 @@ fn run_inner() -> Result<()> {
 
         // Load saved curves from config and apply on startup.
         let saved_config = config::load_config();
-        for curve in &saved_config.custom_curves {
+        for saved_curve in &saved_config.custom_curves {
+            // Sanitize before applying. A config written before step 7 gained a
+            // floor of 1 is still on disk for existing users, and would other-
+            // wise be rejected outright and silently dropped.
+            let mut curve = saved_curve.clone();
+            enforce_safety_minimums(&mut curve.steps);
             info!(
                 "TUI poller: applying saved curve fan{}->sensor{}",
                 curve.fan_id, curve.sensor_id
             );
-            match ctrl.set_custom_curve(curve) {
+            match ctrl.set_custom_curve(&curve) {
                 Ok(()) => {
                     held_curves.push(curve.clone());
                     let _ = tx.send(PollMsg::CustomCurveSet {
@@ -1136,7 +1149,9 @@ fn draw_curve_editor(f: &mut Frame, app: &App, area: Rect) {
             }
 
             // Safety annotation
-            let safety = if i == 8 {
+            let safety = if i == 7 {
+                " min:1"
+            } else if i == 8 {
                 " min:3"
             } else if i == 9 {
                 " min:5"
@@ -1427,4 +1442,65 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             .border_style(Style::default().fg(VIRIDIS_BORDER)),
     );
     f.render_widget(status, area);
+}
+
+// ---------------------------------------------------------------------------
+// Tests — pure step-clamping logic, no terminal required
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- enforce_safety_minimums -------------------------------------------
+
+    #[test]
+    fn enforce_safety_minimums_leaves_low_steps_at_zero() {
+        // Steps 0–6 have no floor, so an idle-off curve survives untouched.
+        let mut steps = [0, 0, 0, 0, 0, 0, 0, 1, 3, 5];
+        enforce_safety_minimums(&mut steps);
+        assert_eq!(steps, [0, 0, 0, 0, 0, 0, 0, 1, 3, 5]);
+    }
+
+    #[test]
+    fn enforce_safety_minimums_raises_step7_to_one() {
+        let mut steps = [0; 10];
+        enforce_safety_minimums(&mut steps);
+        assert_eq!(steps[7], 1);
+        assert_eq!(steps[8], 3);
+        assert_eq!(steps[9], 5);
+        // Steps 0–6 stay off.
+        assert_eq!(&steps[0..7], &[0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn enforce_safety_minimums_does_not_lower_values_above_floors() {
+        let mut steps = [2, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        enforce_safety_minimums(&mut steps);
+        assert_eq!(steps, [2, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    }
+
+    #[test]
+    fn enforce_safety_minimums_propagates_step8_upward_into_step9() {
+        // Step 8 above step 9's floor must drag step 9 up to meet it.
+        let mut steps = [0, 0, 0, 0, 0, 0, 0, 1, 8, 0];
+        enforce_safety_minimums(&mut steps);
+        assert_eq!(steps[8], 8);
+        assert_eq!(steps[9], 8);
+    }
+
+    #[test]
+    fn enforce_safety_minimums_output_passes_validation_floors() {
+        // Whatever goes in, the three floors hold on the way out.
+        for seed in 0u8..=10 {
+            let mut steps = [seed; 10];
+            steps[7] = 0;
+            steps[8] = 0;
+            steps[9] = 0;
+            enforce_safety_minimums(&mut steps);
+            assert!(steps[7] >= 1, "step 7 floor violated for seed {seed}");
+            assert!(steps[8] >= 3, "step 8 floor violated for seed {seed}");
+            assert!(steps[9] >= 5, "step 9 floor violated for seed {seed}");
+        }
+    }
 }

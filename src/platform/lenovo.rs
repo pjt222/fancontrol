@@ -203,10 +203,24 @@ fn encode_fan_table_bytes(curve: &CustomFanCurve) -> [u8; FAN_TABLE_BUFFER_SIZE]
 /// Rules:
 ///   - All steps must be in range 0–10
 ///   - Steps must be non-decreasing (no "death valley" curves)
+///   - Step 7 must be ≥ 1 (fans may not be fully off approaching high temp)
 ///   - Step 8 must be ≥ 3 (high-temp safety minimum)
 ///   - Step 9 must be ≥ 5 (max-temp safety minimum)
 ///
-/// Safety minimums match LenovoLegionToolkit V2: `[1,1,1,1,1,1,1,1,3,5]`.
+/// Safety minimums match LenovoLegionToolkit's **GodMode V1** table,
+/// `[0,0,0,0,0,0,0,1,3,5]`: steps 0–6 may legally be 0, so a curve can idle
+/// with the fans off, while the top three steps carry rising floors.
+///
+/// LLT keeps a second, stricter table for GodMode V2 —
+/// `[1,1,1,1,1,1,1,1,3,5]`, which forbids 0 anywhere — and selects between
+/// them by SmartFan/LegionZone version. Which table the 82RG falls under is
+/// still unconfirmed (see issue #18), so we use V1's, the more permissive of
+/// the two. Note this is a floor, not a target: V1 and V2 agree that step 7
+/// must be at least 1, which is why that bound is safe to enforce before the
+/// V1-vs-V2 question is settled.
+///
+/// The non-decreasing rule is ours, not upstream's — LLT enforces no
+/// monotonicity at all. It is kept as a deliberate safety choice.
 fn validate_custom_curve(curve: &CustomFanCurve) -> Result<(), FanControlError> {
     for (i, &step) in curve.steps.iter().enumerate() {
         if step > MAX_STEP_VALUE {
@@ -229,6 +243,12 @@ fn validate_custom_curve(curve: &CustomFanCurve) -> Result<(), FanControlError> 
     }
 
     // High-temperature safety minimums
+    if curve.steps[7] < 1 {
+        return Err(FanControlError::Platform(format!(
+            "step 7 (approaching high temp) must be >= 1 for safety, got {}",
+            curve.steps[7]
+        )));
+    }
     if curve.steps[8] < 3 {
         return Err(FanControlError::Platform(format!(
             "step 8 (high temp) must be >= 3 for safety, got {}",
@@ -889,10 +909,12 @@ mod tests {
 
     #[test]
     fn validate_custom_curve_flat_then_ramp() {
+        // Steps 0–6 may sit at 0 (fans off at idle), but step 7 now carries a
+        // floor of 1 per LLT's GodMode V1 minimum table.
         let curve = CustomFanCurve {
             fan_id: 0,
             sensor_id: 3,
-            steps: [0, 0, 0, 0, 0, 0, 0, 0, 5, 10],
+            steps: [0, 0, 0, 0, 0, 0, 0, 1, 5, 10],
         };
         assert!(validate_custom_curve(&curve).is_ok());
     }
@@ -921,10 +943,11 @@ mod tests {
 
     #[test]
     fn validate_custom_curve_step8_too_low() {
+        // Step 7 is held at its floor so this isolates the step 8 violation.
         let curve = CustomFanCurve {
             fan_id: 0,
             sensor_id: 3,
-            steps: [0, 0, 0, 0, 0, 0, 0, 0, 2, 5],
+            steps: [0, 0, 0, 0, 0, 0, 0, 1, 2, 5],
         };
         let err = validate_custom_curve(&curve).unwrap_err();
         assert!(err.to_string().contains("step 8"));
@@ -932,10 +955,11 @@ mod tests {
 
     #[test]
     fn validate_custom_curve_step9_too_low() {
+        // Step 7 is held at its floor so this isolates the step 9 violation.
         let curve = CustomFanCurve {
             fan_id: 0,
             sensor_id: 3,
-            steps: [0, 0, 0, 0, 0, 0, 0, 0, 3, 4],
+            steps: [0, 0, 0, 0, 0, 0, 0, 1, 3, 4],
         };
         let err = validate_custom_curve(&curve).unwrap_err();
         assert!(err.to_string().contains("step 9"));
@@ -1037,5 +1061,19 @@ FAN|1|4|0|31";
         assert_eq!(fans[1].id, "fan1");
         assert_eq!(fans[1].speed_rpm, 0);
         assert_eq!(fans[1].curves.len(), 1);
+    }
+
+    #[test]
+    fn validate_custom_curve_step7_too_low() {
+        // Step 7 is the lowest step carrying a floor. LLT's V1 and V2 minimum
+        // tables disagree about steps 0–6 but both require >= 1 here, so this
+        // bound holds whichever table the hardware falls under.
+        let curve = CustomFanCurve {
+            fan_id: 0,
+            sensor_id: 3,
+            steps: [0, 0, 0, 0, 0, 0, 0, 0, 3, 5],
+        };
+        let err = validate_custom_curve(&curve).unwrap_err();
+        assert!(err.to_string().contains("step 7"));
     }
 }
