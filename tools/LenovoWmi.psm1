@@ -148,8 +148,23 @@ function Get-LenovoBiosVersion {
     }
 
     if (-not $raw) {
-        Write-ToolLog "  WARNING: BIOS version unavailable; prefix and version reported as null"
-        return [pscustomobject]@{ Raw = $null; Prefix = $null; Version = $null }
+        # Prefix and Version are empty strings, NOT $null, while Raw stays $null as
+        # the "unavailable" signal. This is load-bearing: consumers look the prefix
+        # up in a hashtable, and Hashtable.ContainsKey($null) throws
+        # ArgumentNullException rather than returning false, whereas
+        # ContainsKey('') safely misses. Returning nulls here moved the crash from
+        # this function into its caller -- in exactly the missing-BIOSVersion case
+        # this guard exists for.
+        #
+        # Empty also matches upstream on both halves of the asymmetry it produces.
+        # LLT gates V1 with `affectedBiosVersions.Any(bv => biosVersion?.IsLowerThan(bv) ?? false)`,
+        # so a wholly unknown BIOS coalesces to false and *allows* V1 -- which is
+        # what an unmatched prefix gives. A known-blocklisted prefix with an
+        # unparseable version still blocks, because IsLowerThan returns true when
+        # either version is null (Structs.cs:69-78). Unknown prefix allows, unknown
+        # version blocks: deliberate, and upstream's.
+        Write-ToolLog "  WARNING: BIOS version unavailable; prefix and version reported as empty"
+        return [pscustomobject]@{ Raw = $null; Prefix = ''; Version = '' }
     }
 
     $raw = $raw.Trim()

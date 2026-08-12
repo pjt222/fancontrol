@@ -100,7 +100,10 @@ Write-ToolLog ("  Parsed per LLT: prefix = " + $bios.Prefix + ", version = " + $
 $biosBlocklist = @{ 'G9CN' = 24; 'GKCN' = 46; 'H1CN' = 39; 'HACN' = 31; 'HHCN' = 20 }
 Write-ToolLog "  V1 BIOS blocklist: G9CN 24, GKCN 46, H1CN 39, HACN 31, HHCN 20"
 $biosBlocksV1 = $false
-if ($biosBlocklist.ContainsKey($bios.Prefix)) {
+# Belt and braces on the prefix: Get-LenovoBiosVersion returns '' rather than
+# $null precisely so this lookup is safe, but ContainsKey($null) throws instead of
+# missing, so do not rely on the producer alone.
+if ($bios.Prefix -and $biosBlocklist.ContainsKey($bios.Prefix)) {
     $minimum = $biosBlocklist[$bios.Prefix]
     if ($bios.Version -match '^\d+$') {
         if ([int]$bios.Version -lt $minimum) {
