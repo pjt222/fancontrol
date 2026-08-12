@@ -245,9 +245,13 @@ function Invoke-LenovoWmiMethod {
 
         if ($AsObject) { return $result }
 
-        $value = $result.$Property
+        # Read via Get-WmiPropertyOrNull so an absent property is reported as such
+        # rather than surfacing as "ERROR calling <method>" from the catch below.
+        # Under Set-StrictMode a direct $result.$Property access on a missing
+        # property throws, which would misattribute the failure to the call.
+        $value = Get-WmiPropertyOrNull -InputObject $result -Name $Property
         if ($null -eq $value) {
-            Write-ToolLog ("  WARNING: " + $Method + " returned no '" + $Property + "' property")
+            Write-ToolLog ("  WARNING: " + $Method + " succeeded but exposes no '" + $Property + "' property")
         }
         return $value
     } catch {

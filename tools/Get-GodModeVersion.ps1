@@ -86,11 +86,22 @@ Write-ToolLog "  V1 BIOS blocklist: G9CN 24, GKCN 46, H1CN 39, HACN 31, HHCN 20"
 $biosBlocksV1 = $false
 if ($biosBlocklist.ContainsKey($bios.Prefix)) {
     $minimum = $biosBlocklist[$bios.Prefix]
-    if ([int]$bios.Version -lt $minimum) {
-        $biosBlocksV1 = $true
-        Write-ToolLog ("  BIOS gate BLOCKS V1: prefix matches and " + $bios.Version + " < " + $minimum)
+    if ($bios.Version -match '^\d+$') {
+        if ([int]$bios.Version -lt $minimum) {
+            $biosBlocksV1 = $true
+            Write-ToolLog ("  BIOS gate BLOCKS V1: prefix matches and " + $bios.Version + " < " + $minimum)
+        } else {
+            Write-ToolLog ("  BIOS gate allows V1: prefix matches but " + $bios.Version + " >= " + $minimum)
+        }
     } else {
-        Write-ToolLog ("  BIOS gate allows V1: prefix matches but " + $bios.Version + " >= " + $minimum)
+        # Mirrors LLT's BiosVersion.IsLowerThan, which returns true -- i.e. treats
+        # the version as lower, blocking V1 -- when either side's version is null.
+        # Guarding the cast matters: the version comes from a regex match that
+        # yields an empty string on no match, and [int]'' is a terminating error.
+        $biosBlocksV1 = $true
+        Write-ToolLog ("  BIOS gate BLOCKS V1: prefix " + $bios.Prefix + " is blocklisted and no")
+        Write-ToolLog ("    numeric version parsed from '" + $bios.Raw + "'; LLT treats an unknown")
+        Write-ToolLog ("    version as lower.")
     }
 } else {
     Write-ToolLog "  BIOS gate allows V1: prefix not in blocklist, IsLowerThan returns false"
@@ -157,7 +168,12 @@ $maxSpeeds = @()
 $tables = Get-LenovoWmiClass -ClassName 'LENOVO_FAN_TABLE_DATA'
 if ($tables) {
     foreach ($table in $tables) {
-        Write-ToolLog ("  --- Fan_Id=" + $table.Fan_Id + " Sensor_ID=" + $table.Sensor_ID + " ---")
+        # Guarded like every other property read here. These two are the class's
+        # key properties and are present on the 82RG, but a direct access is the
+        # same StrictMode abort that truncated the first run of this probe.
+        $fanId = Get-WmiPropertyOrNull $table 'Fan_Id'
+        $sensorId = Get-WmiPropertyOrNull $table 'Sensor_ID'
+        Write-ToolLog ("  --- Fan_Id=" + $fanId + " Sensor_ID=" + $sensorId + " ---")
         Write-WmiProperties $table
         # Read through Get-WmiPropertyOrNull: DefaultFanMaxSpeed is absent on the
         # 82RG, and under Set-StrictMode a direct access would abort the run.
