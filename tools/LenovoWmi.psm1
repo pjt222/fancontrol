@@ -9,6 +9,7 @@
 Set-StrictMode -Version Latest
 
 $script:LogPath = $null
+$script:ReadOnlyMode = $false
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -23,8 +24,10 @@ function Start-ToolLog {
     .PARAMETER Title
     Human-readable tool name for the header.
     .PARAMETER ReadOnly
-    State in the header that the tool invokes no setters. Use this for probes so
-    the log itself records that nothing was mutated.
+    Declare that the tool invokes no setters. This is enforced, not merely
+    recorded: it arms a module flag that makes Invoke-LenovoWmiMethod refuse any
+    method whose name begins Set or Fan_Set. A tool that claims to be read-only
+    therefore cannot quietly become one that writes to the EC.
     #>
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -32,6 +35,7 @@ function Start-ToolLog {
         [switch]$ReadOnly
     )
     $script:LogPath = $Path
+    $script:ReadOnlyMode = [bool]$ReadOnly
     "" | Out-File -FilePath $Path -Encoding utf8
     Write-ToolLog ("=== " + $Title + " ===")
     Write-ToolLog "Machine: $env:COMPUTERNAME"
@@ -108,11 +112,12 @@ function Get-WmiPropertyOrNull {
 function Test-Elevated {
     <#
     .SYNOPSIS
-    True when the current process can reach the root\WMI namespace.
+    True when the current process is running as Administrator.
     .DESCRIPTION
-    The Lenovo WMI classes live in root\WMI and return "access denied" without
-    elevation. Calling this first turns a confusing mid-run failure into a clear
-    up-front message.
+    A proxy for "can reach root\WMI", not a direct test of it. The Lenovo classes
+    live in root\WMI and return "access denied" without elevation, so checking
+    the Administrator role up front turns a confusing mid-run failure into a clear
+    message. It does not prove access -- policy could deny an elevated process.
     #>
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
@@ -130,8 +135,24 @@ function Get-LenovoBiosVersion {
     false outright when two prefixes differ, so a prefix that appears in no
     blocklist can never be "lower than" a blocklisted entry.
     #>
-    $raw = (Get-ItemProperty 'HKLM:\HARDWARE\DESCRIPTION\System\BIOS').BIOSVersion
-    if ($raw) { $raw = $raw.Trim() }
+    # Fully guarded: this runs before the first try block in a calling tool, and
+    # with $ErrorActionPreference = 'Stop' any throw here kills the run just after
+    # the log header is written. A missing registry value throws under StrictMode,
+    # and [regex]::Match($null, ...) throws ArgumentNullException -- so guarding
+    # only the Trim, as an earlier version did, left both regex calls exposed.
+    $raw = $null
+    try {
+        $raw = (Get-ItemProperty 'HKLM:\HARDWARE\DESCRIPTION\System\BIOS' -ErrorAction Stop).BIOSVersion
+    } catch {
+        Write-ToolLog ("  WARNING: could not read BIOSVersion from the registry: " + $_.Exception.Message)
+    }
+
+    if (-not $raw) {
+        Write-ToolLog "  WARNING: BIOS version unavailable; prefix and version reported as null"
+        return [pscustomobject]@{ Raw = $null; Prefix = $null; Version = $null }
+    }
+
+    $raw = $raw.Trim()
     [pscustomobject]@{
         Raw     = $raw
         Prefix  = [regex]::Match($raw, '^[A-Z0-9]{4}').Value
@@ -159,6 +180,14 @@ function Get-LenovoWmiClass {
     try {
         $instances = @(Get-WmiObject -Namespace root/WMI -Class $ClassName -ErrorAction Stop)
         Write-ToolLog ("  " + $ClassName + " found, instances: " + $instances.Count)
+        # Distinguish "class absent" from "class present but empty". Indexing [0]
+        # on an empty array is a StrictMode error that the catch below would
+        # otherwise report as "not available", which is a different and misleading
+        # diagnosis.
+        if ($instances.Count -eq 0) {
+            Write-ToolLog ("  WARNING: " + $ClassName + " exists but has no instances")
+            return $null
+        }
         if ($Single) { return $instances[0] }
         return $instances
     } catch {
@@ -186,10 +215,21 @@ function Invoke-LenovoWmiMethod {
     the GetMethodParameters path.
     .PARAMETER PositionalArguments
     Same values in declaration order, for the adapted-call fallback. Supply both
-    for any method taking arguments: GetMethodParameters is not available for
-    every method on every firmware -- LENOVO_OTHER_METHOD.GetFeatureValue on the
-    82RG is one that fails -- and without positional values such a method cannot
-    be called at all.
+    for any method taking arguments, because GetMethodParameters is not available
+    for every method on every firmware.
+
+    Two distinct failures look alike here and only one is recoverable. If the
+    method EXISTS but GetMethodParameters is unsupported for it, this fallback
+    works. If the method is ABSENT, neither path can help -- $WmiObject.$Method
+    throws before .Invoke is reached. LENOVO_OTHER_METHOD.GetFeatureValue on the
+    82RG is the second kind, not the first, so it is not an example of this
+    fallback succeeding.
+
+    Caveat when it does fire: the GetMethodParameters path assigns through
+    $inParams[$key] and coerces to the declared CIM type, whereas this path
+    relies on PowerShell marshalling raw values in positional order with no
+    validation. An Int32 literal passed where the method declares UInt32 can
+    mis-bind rather than error. Prefer the named path wherever it is available.
     .PARAMETER AsObject
     Return the whole output object rather than a single property.
     #>
@@ -206,6 +246,12 @@ function Invoke-LenovoWmiMethod {
         [Parameter(Mandatory)][string]$Property,
         [switch]$AsObject
     )
+    # Deliberately outside the try below, so this propagates as a terminating
+    # error rather than being logged and swallowed. A read-only tool reaching a
+    # setter is a bug in the tool, not a firmware quirk to tolerate.
+    if ($script:ReadOnlyMode -and $Method -match '^(Set|Fan_Set)') {
+        throw ("refusing to call " + $Method + " -- this tool declared itself read-only via Start-ToolLog -ReadOnly")
+    }
     if ($null -eq $WmiObject) {
         Write-ToolLog ("  SKIP " + $Method + " -- no WMI object")
         return $null
@@ -230,10 +276,13 @@ function Invoke-LenovoWmiMethod {
             # arguments positionally.
             $positional = $PositionalArguments
             if ($positional.Count -eq 0 -and $Arguments.Count -eq 1) {
-                $positional = @($Arguments.Values)[0]
-                $positional = @($positional)
+                $positional = @(@($Arguments.Values)[0])
             }
-            if ($positional.Count -ne $Arguments.Count) {
+            # Guard on "arguments are needed but none are available positionally".
+            # Comparing counts against $Arguments would reject a caller who
+            # supplied only -PositionalArguments -- which is the supported shape --
+            # and would report the opposite of what happened.
+            if ($positional.Count -eq 0 -and $Arguments.Count -gt 0) {
                 throw ("cannot call " + $Method + " -- GetMethodParameters unavailable and no PositionalArguments supplied")
             }
             Write-ToolLog ("  (GetMethodParameters unavailable for " + $Method + ", using adapted call)")

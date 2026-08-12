@@ -20,8 +20,20 @@ firmware may reject.
 Accessors mirror LLT (archived 2025-07-24):
     SmartFanVersion       LENOVO_GAMEZONE_DATA.IsSupportSmartFan()             -> Data
     SupportedPowerModes   LENOVO_OTHER_METHOD.GetFeatureValue(0x00070000)      -> Value, bit 16 = GodMode
+      fallback            LENOVO_OTHER_METHOD.GetSupportThermalMode()          -> mode, same bit layout
     LegionZoneVersion     LENOVO_OTHER_METHOD.GetFeatureValue(0x00090000)      -> Value
       fallback            LENOVO_OTHER_METHOD.Get_Support_LegionZone_Version() -> Version
+
+On the 82RG GetFeatureValue does not exist at all, so both fallbacks are the
+working path; the power-mode fallback is what produced the measured 65543. LLT
+decodes bits 0/1/2/16 identically from either source, so the fallback is not a
+degraded reading.
+
+Departure from LLT worth knowing: this script requires GodMode support for both
+verdicts, whereas LLT's GetSupportsGodModeV1 predicate does not include it. A
+machine with SmartFanVersion 5 but bit 16 clear reports UNDETERMINED here where
+LLT would still say V1. That is deliberate -- without GodMode there are no custom
+curves to validate -- but it is an addition, not a mirror.
 
 .PARAMETER LogPath
 Where to write the log. Defaults to Get-GodModeVersion.log beside this script.
@@ -40,8 +52,12 @@ Capture a machine-readable result.
 .NOTES
 Requires an elevated shell: the Lenovo classes live in root\WMI and return
 "access denied" otherwise. Issue #25.
+
+Deliberately no "#Requires -RunAsAdministrator": that refuses to launch the
+script at all, so nothing reaches the log and the Test-Elevated block below
+would be unreachable dead code. For a diagnostic tool the useful behaviour is to
+start the log, record why it stopped, and exit.
 #>
-#Requires -RunAsAdministrator
 [CmdletBinding()]
 param(
     [string]$LogPath,
@@ -187,21 +203,32 @@ if ($tables) {
         }
     }
 
-    # Step-scale observation, relevant to issue #18. fancontrol allows step values
-    # 0..MAX_STEP_VALUE (10), which is eleven distinct values, while the firmware
-    # table holds FanTable_Len entries. If the table has ten, the counts do not
-    # line up under a direct-index reading, and "0 = off, 1..10 index the ten
-    # entries" fits. Suggestive, not proof -- the load test in #18 decides.
+    # Step-scale observation for issue #18, reported with its counter-evidence.
+    # An 11-valued step domain over a 10-entry table needs SOME explanation, but
+    # several fit and the data here does not choose between them.
     $firstLen = Get-WmiPropertyOrNull $tables[0] 'FanTable_Len'
     if ($null -ne $firstLen) {
+        $minSpeed = Get-WmiPropertyOrNull $tables[0] 'CurrentFanMinSpeed'
+        $designMax = Get-WmiPropertyOrNull $tables[0] 'DesignMaxFanSpeedNumber'
         Write-ToolLog ""
         Write-ToolLog ("  FanTable_Len = " + $firstLen + " entries, indices 0.." + ([int]$firstLen - 1))
         Write-ToolLog "  fancontrol step range = 0..10, i.e. 11 distinct values"
-        if ([int]$firstLen -eq 10) {
-            Write-ToolLog "  => 11 step values over a 10-entry table. A direct-index reading"
-            Write-ToolLog "     leaves step 10 out of bounds, which favours 0 = off with"
-            Write-ToolLog "     steps 1..10 mapping to entries 0..9. See issue #18."
+        Write-ToolLog "  The counts do not line up. Candidate explanations, none yet ruled out:"
+        Write-ToolLog "    (a) 0 = off, steps 1..10 map to entries 0..9"
+        Write-ToolLog "    (b) step 10 is clamped or a sentinel; firmware saturates to the top entry"
+        Write-ToolLog "    (c) the 0..10 bound is LLT's own UI scale, not firmware-derived, in which"
+        Write-ToolLog "        case the mismatch says nothing about the EC"
+        Write-ToolLog "    (d) 0 means inherit / no change rather than off"
+        Write-ToolLog "  Evidence pointing AWAY from (a):"
+        if ($null -ne $minSpeed) {
+            Write-ToolLog ("    CurrentFanMinSpeed = " + $minSpeed + ", which equals FanTable_Data[0].")
+            Write-ToolLog "      The firmware's self-reported minimum is entry 0, not zero."
         }
+        if ($null -ne $designMax) {
+            Write-ToolLog ("    DesignMaxFanSpeedNumber = " + $designMax + ", consistent with a 0..9")
+            Write-ToolLog "      index range, i.e. direct indexing rather than an off-by-one."
+        }
+        Write-ToolLog "  Unresolved. Only the load test in #18 AC-2 can settle it."
     }
 }
 Write-ToolLog ""

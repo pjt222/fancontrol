@@ -36,8 +36,10 @@ is enough for model and BIOS reads, but not for anything under `root\WMI`.
 
 These exist because each one has already cost a debugging session:
 
-- **ASCII only.** Windows PowerShell 5.1 cannot read UTF-8 without a BOM, so an
-  em dash or a curly quote anywhere in a `.ps1` breaks parsing. Use `--`.
+- **ASCII only.** Windows PowerShell 5.1 assumes ANSI for a BOM-less file, so an
+  em dash or curly quote in a `.ps1` is mangled and can break parsing. Use `--`.
+  Note the logs themselves are BOM'd: `-Encoding utf8` on 5.1 writes UTF-8 *with*
+  a BOM. Harmless, but it is why the log's first line looks blank.
 - **Read the named output property, never `.ReturnValue`.** Lenovo WMI methods
   return their result in a named property: `Data`, `Value`, `Status`, `Version`,
   `CurrentFanSpeed`. Earlier probes in `scripts/` read `.ReturnValue` and errored.
@@ -47,15 +49,24 @@ These exist because each one has already cost a debugging session:
 - **`(...) -join ' '` rather than `Join-String`,** which needs PowerShell 6.2+.
 - **`${var}:` before a colon in a string,** since `$var:` parses as a
   drive-qualified variable.
-- **`Get-WmiObject`, not `Get-CimInstance`,** for method invocation.
-- **Say so in the log when a tool is read-only.** Pass `-ReadOnly` to
-  `Start-ToolLog`. Anything that writes a fan table or changes a power mode must
-  not claim it.
+- **`Get-WmiObject`, not `Get-CimInstance`,** for the pattern used here.
+  `Invoke-CimMethod` *does* invoke methods on `root\WMI`; the accurate reason is
+  narrower: `Get-CimInstance` returns inert objects with no adapted methods, so
+  the `GetMethodParameters` / `$obj.Method()` approach these tools use needs
+  `Get-WmiObject`.
+- **Pass `-ReadOnly` to `Start-ToolLog` when a tool only reads.** It is enforced,
+  not just recorded: it arms a module flag that makes `Invoke-LenovoWmiMethod`
+  throw on any method named `Set*` or `Fan_Set*`, so a read-only tool cannot
+  quietly grow a write. Anything that writes a fan table or changes a power mode
+  must not pass it.
 
 ## Writing a new tool
 
+Do not add `#Requires -RunAsAdministrator`: it refuses to launch the script, so
+nothing reaches the log and the `Test-Elevated` block becomes dead code. Let the
+tool start its log, record why it stopped, and exit.
+
 ```powershell
-#Requires -RunAsAdministrator
 [CmdletBinding()]
 param([string]$LogPath, [switch]$Json)
 

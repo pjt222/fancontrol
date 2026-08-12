@@ -114,8 +114,22 @@ firmware, so LLT's `GetDefaultFanMaxSpeedAsync` would fail here;
 `CurrentFanMaxSpeed` is the usable source and makes the stubbed
 `Fan_Get_MaxSpeed` unnecessary.
 
-Note for issue #18: the table holds **10** entries (indices 0–9) while
-`MAX_STEP_VALUE` of 10 admits **11** distinct step values. A direct-index reading
-leaves step 10 out of bounds, which favours "0 = off, steps 1–10 map to entries
-0–9" over the reading in `CustomFanCurve`'s doc comment. Suggestive, not proof —
-the load test in #18 decides.
+Note for issue #18, stated with its counter-evidence: the table holds **10**
+entries (indices 0–9) while `MAX_STEP_VALUE` of 10 admits **11** distinct step
+values. That mismatch needs some explanation, but at least four fit and the
+measurements do not choose between them — (a) 0 = off with steps 1–10 mapping to
+entries 0–9; (b) step 10 clamped or a sentinel, firmware saturating to the top
+entry; (c) the 0–10 bound being LLT's own UI scale rather than firmware-derived,
+in which case it says nothing about the EC; (d) 0 meaning inherit rather than off.
+
+Two measurements point **away** from (a): `CurrentFanMinSpeed = 1600` is exactly
+`FanTable_Data[0]`, so the firmware's self-reported minimum is entry 0 and not
+zero; and `DesignMaxFanSpeedNumber = 9` is consistent with a 0–9 index range,
+i.e. direct indexing. **Treat the step-0 meaning as unresolved.** Only #18's load
+test settles it.
+
+Do not read the V1 minimum table together with this note as licence for
+fans-fully-off across the seven lowest bands. V1 permitting a step of 0 is a
+statement about what the *validator* accepts in the lowest temperature bands;
+actual behaviour is governed by the EC's own minimum (1600 RPM) and its idle
+handling, neither of which the curve table controls.
