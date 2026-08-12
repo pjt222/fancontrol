@@ -16,7 +16,7 @@ use log::{debug, info, warn};
 
 use super::FanController;
 use crate::errors::FanControlError;
-use crate::fan::{CustomFanCurve, Fan, FanCurve, FanCurvePoint};
+use crate::fan::{CustomFanCurve, Fan, FanCurve, FanCurvePoint, MAX_STEP_VALUE};
 
 /// Fallback RPM range used when table data is unavailable.
 const DEFAULT_MIN_RPM: u32 = 1600;
@@ -170,9 +170,6 @@ fn parse_fan_line(
 // Custom fan curve encoding and validation (pure — no I/O)
 // ---------------------------------------------------------------------------
 
-/// Maximum allowed value for a speed step index.
-const MAX_STEP_VALUE: u8 = 10;
-
 /// Size of the Fan_Set_Table byte buffer.
 const FAN_TABLE_BUFFER_SIZE: usize = 64;
 
@@ -203,25 +200,36 @@ fn encode_fan_table_bytes(curve: &CustomFanCurve) -> [u8; FAN_TABLE_BUFFER_SIZE]
 /// Rules:
 ///   - All steps must be in range 0–10
 ///   - Steps must be non-decreasing (no "death valley" curves)
-///   - Step 7 must be ≥ 1 (fans may not be fully off approaching high temp)
+///   - Step 7 must be ≥ 1 (upstream parity — see the caveat below)
 ///   - Step 8 must be ≥ 3 (high-temp safety minimum)
 ///   - Step 9 must be ≥ 5 (max-temp safety minimum)
 ///
 /// Safety minimums match LenovoLegionToolkit's **GodMode V1** table,
-/// `[0,0,0,0,0,0,0,1,3,5]`: steps 0–6 may legally be 0, so a curve can idle
-/// with the fans off, while the top three steps carry rising floors.
+/// `[0,0,0,0,0,0,0,1,3,5]`, element for element: V1's own floors for steps 0–6
+/// are zero, so declining to floor them is V1 parity, not a third scheme.
 ///
 /// LLT keeps a second, stricter table for GodMode V2 —
 /// `[1,1,1,1,1,1,1,1,3,5]`, which forbids 0 anywhere — and selects between
 /// them by SmartFan/LegionZone version. Which table the 82RG falls under is
-/// still unconfirmed (see issue #18), so we use V1's, the more permissive of
-/// the two. Note this is a floor, not a target: V1 and V2 agree that step 7
-/// must be at least 1, which is why that bound is safe to enforce before the
-/// V1-vs-V2 question is settled.
+/// still unconfirmed (see issue #18), so we take V1's, the more permissive of
+/// the two. Permissive-first is deliberate: if the hardware turns out to be V2,
+/// the firmware rejects the curve and the user sees an error at the WMI
+/// boundary, which is a better failure than silently refusing curves the
+/// hardware would have accepted.
+///
+/// **What the step 7 floor does and does not claim.** Both tables require ≥ 1
+/// at step 7, which is the whole justification for enforcing it now — it is
+/// upstream parity under either. It is *not* known to be an off-versus-on
+/// guarantee. Whether step value 0 means "fans off" or the lowest table entry
+/// (~1600 RPM on the 82RG) is exactly the open question in issue #18, and this
+/// crate documents both readings: `CustomFanCurve` describes steps as direct
+/// indices where 0 → 1600 RPM, while `MAX_STEP_VALUE` of 10 makes an
+/// eleven-value scale over a ten-entry table, which fits 0 = off. Do not read
+/// a thermal guarantee into this floor until #18 settles it.
 ///
 /// The non-decreasing rule is ours, not upstream's — LLT enforces no
 /// monotonicity at all. It is kept as a deliberate safety choice.
-fn validate_custom_curve(curve: &CustomFanCurve) -> Result<(), FanControlError> {
+pub(crate) fn validate_custom_curve(curve: &CustomFanCurve) -> Result<(), FanControlError> {
     for (i, &step) in curve.steps.iter().enumerate() {
         if step > MAX_STEP_VALUE {
             return Err(FanControlError::Platform(format!(

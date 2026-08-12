@@ -51,6 +51,13 @@ pub struct Fan {
     pub full_speed_active: bool,
 }
 
+/// Maximum allowed value for a speed step index.
+///
+/// Lives here rather than in the Lenovo backend because the TUI's step
+/// sanitizer needs it too, and that module is compiled on every platform while
+/// the backend is not. One definition, so the two cannot drift.
+pub const MAX_STEP_VALUE: u8 = 10;
+
 /// A user-defined custom fan curve to write to the EC via Fan_Set_Table.
 ///
 /// The `steps` array contains 10 speed step indices (0–10 scale) that index
