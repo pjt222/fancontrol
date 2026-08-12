@@ -44,12 +44,24 @@ src/
     ├── linux.rs     # sysfs/hwmon backend
     ├── windows.rs   # Generic WMI backend (Win32_Fan) + is_lenovo() detection
     └── lenovo.rs    # Lenovo Legion backend (LENOVO_FAN_METHOD via PowerShell)
-scripts/
+scripts/                    # One-off probes, kept for their logs
 ├── probe-wmi-methods.ps1   # WMI method probe (run on native Windows)
 ├── dump-fan-table.ps1      # Full fan table dump
+├── probe-set-table.ps1     # Fan_Set_Table write probe
 ├── probe-wmi-methods.log   # Probe results
 └── dump-fan-table.log      # Table dump results
+tools/                      # Reusable tooling — prefer adding here
+├── README.md               # Conventions and a template for new tools
+├── LenovoWmi.psm1          # Shared module: logging, elevation, BIOS parsing, root\WMI access
+└── Get-GodModeVersion.ps1  # GodMode V1/V2 detection + fan max-speed properties (#25)
 ```
+
+**`scripts/` vs `tools/`**: `scripts/` holds historical one-off probes; do not
+extend them. New Windows tooling goes in `tools/`, built on `LenovoWmi.psm1` so
+the logging and WMI-access conventions stay in one place. See `tools/README.md`
+for the conventions, each of which exists because it already cost a debugging
+session — ASCII-only for PowerShell 5.1, named output properties rather than
+`.ReturnValue`, and so on.
 
 **Key pattern**: `FanController` trait in `platform/mod.rs` is the core abstraction. `create_controller()` returns `Box<dyn FanController>` using `#[cfg(target_os)]` to select the platform backend at compile time.
 
@@ -73,3 +85,51 @@ Working on test hardware (Legion 82RG):
 Firmware stubs (return empty data): `Fan_Get_MaxSpeed`, `Fan_Get_Table`
 
 Untested/deferred: `Fan_Set_Table`, `Fan_Set_MaxSpeed`
+
+Absent entirely on this firmware: `LENOVO_OTHER_METHOD.GetFeatureValue`. LLT's
+preferred capability accessor does not exist here ("property not found"), so the
+older per-feature methods are the working path — `GetSupportThermalMode` and
+`Get_Support_LegionZone_Version` both succeed.
+
+### GodMode version: V1 (measured 2026-08-12, issue #25)
+
+Determined by `tools/Get-GodModeVersion.ps1`:
+
+| Input | Value |
+|---|---|
+| `SmartFanVersion` (`IsSupportSmartFan` → `Data`) | **5** → V1 range (4 or 5) |
+| `LegionZoneVersion` (`Get_Support_LegionZone_Version` → `Version`) | **2** → V1 range (1 or 2) |
+| Power mode mask (`GetSupportThermalMode` → `mode`) | **65543** = `0x10007`; bit 16 set, so GodMode is supported |
+| BIOS | `JUCN68WW` → prefix `JUCN`, version `68`; not in LLT's V1 blocklist, so the gate passes |
+
+**This machine is GodMode V1**, so the minimum step table is
+`[0,0,0,0,0,0,0,1,3,5]` and fancontrol's floors in `validate_custom_curve` are
+correct. Steps 0–6 may legally be 0.
+
+### Fan table properties, per (Fan_Id, Sensor_ID)
+
+All three entries report `FanTable_Len = 10`, `CurrentFanMinSpeed = 1600`,
+`CurrentFanMaxSpeed = 4800`. **`DefaultFanMaxSpeed` does not exist** on this
+firmware, so LLT's `GetDefaultFanMaxSpeedAsync` would fail here;
+`CurrentFanMaxSpeed` is the usable source and makes the stubbed
+`Fan_Get_MaxSpeed` unnecessary.
+
+Note for issue #18, stated with its counter-evidence: the table holds **10**
+entries (indices 0–9) while `MAX_STEP_VALUE` of 10 admits **11** distinct step
+values. That mismatch needs some explanation, but at least four fit and the
+measurements do not choose between them — (a) 0 = off with steps 1–10 mapping to
+entries 0–9; (b) step 10 clamped or a sentinel, firmware saturating to the top
+entry; (c) the 0–10 bound being LLT's own UI scale rather than firmware-derived,
+in which case it says nothing about the EC; (d) 0 meaning inherit rather than off.
+
+Two measurements point **away** from (a): `CurrentFanMinSpeed = 1600` is exactly
+`FanTable_Data[0]`, so the firmware's self-reported minimum is entry 0 and not
+zero; and `DesignMaxFanSpeedNumber = 9` is consistent with a 0–9 index range,
+i.e. direct indexing. **Treat the step-0 meaning as unresolved.** Only #18's load
+test settles it.
+
+Do not read the V1 minimum table together with this note as licence for
+fans-fully-off across the seven lowest bands. V1 permitting a step of 0 is a
+statement about what the *validator* accepts in the lowest temperature bands;
+actual behaviour is governed by the EC's own minimum (1600 RPM) and its idle
+handling, neither of which the curve table controls.
