@@ -16,7 +16,7 @@ use log::{debug, info, warn};
 
 use super::FanController;
 use crate::errors::FanControlError;
-use crate::fan::{CustomFanCurve, Fan, FanCurve, FanCurvePoint};
+use crate::fan::{CustomFanCurve, Fan, FanCurve, FanCurvePoint, MAX_STEP_VALUE};
 
 /// Fallback RPM range used when table data is unavailable.
 const DEFAULT_MIN_RPM: u32 = 1600;
@@ -170,9 +170,6 @@ fn parse_fan_line(
 // Custom fan curve encoding and validation (pure — no I/O)
 // ---------------------------------------------------------------------------
 
-/// Maximum allowed value for a speed step index.
-const MAX_STEP_VALUE: u8 = 10;
-
 /// Size of the Fan_Set_Table byte buffer.
 const FAN_TABLE_BUFFER_SIZE: usize = 64;
 
@@ -203,11 +200,36 @@ fn encode_fan_table_bytes(curve: &CustomFanCurve) -> [u8; FAN_TABLE_BUFFER_SIZE]
 /// Rules:
 ///   - All steps must be in range 0–10
 ///   - Steps must be non-decreasing (no "death valley" curves)
+///   - Step 7 must be ≥ 1 (upstream parity — see the caveat below)
 ///   - Step 8 must be ≥ 3 (high-temp safety minimum)
 ///   - Step 9 must be ≥ 5 (max-temp safety minimum)
 ///
-/// Safety minimums match LenovoLegionToolkit V2: `[1,1,1,1,1,1,1,1,3,5]`.
-fn validate_custom_curve(curve: &CustomFanCurve) -> Result<(), FanControlError> {
+/// Safety minimums match LenovoLegionToolkit's **GodMode V1** table,
+/// `[0,0,0,0,0,0,0,1,3,5]`, element for element: V1's own floors for steps 0–6
+/// are zero, so declining to floor them is V1 parity, not a third scheme.
+///
+/// LLT keeps a second, stricter table for GodMode V2 —
+/// `[1,1,1,1,1,1,1,1,3,5]`, which forbids 0 anywhere — and selects between
+/// them by SmartFan/LegionZone version. Which table the 82RG falls under is
+/// still unconfirmed (see issue #18), so we take V1's, the more permissive of
+/// the two. Permissive-first is deliberate: if the hardware turns out to be V2,
+/// the firmware rejects the curve and the user sees an error at the WMI
+/// boundary, which is a better failure than silently refusing curves the
+/// hardware would have accepted.
+///
+/// **What the step 7 floor does and does not claim.** Both tables require ≥ 1
+/// at step 7, which is the whole justification for enforcing it now — it is
+/// upstream parity under either. It is *not* known to be an off-versus-on
+/// guarantee. Whether step value 0 means "fans off" or the lowest table entry
+/// (~1600 RPM on the 82RG) is exactly the open question in issue #18, and this
+/// crate documents both readings: `CustomFanCurve` describes steps as direct
+/// indices where 0 → 1600 RPM, while `MAX_STEP_VALUE` of 10 makes an
+/// eleven-value scale over a ten-entry table, which fits 0 = off. Do not read
+/// a thermal guarantee into this floor until #18 settles it.
+///
+/// The non-decreasing rule is ours, not upstream's — LLT enforces no
+/// monotonicity at all. It is kept as a deliberate safety choice.
+pub(crate) fn validate_custom_curve(curve: &CustomFanCurve) -> Result<(), FanControlError> {
     for (i, &step) in curve.steps.iter().enumerate() {
         if step > MAX_STEP_VALUE {
             return Err(FanControlError::Platform(format!(
@@ -229,6 +251,12 @@ fn validate_custom_curve(curve: &CustomFanCurve) -> Result<(), FanControlError> 
     }
 
     // High-temperature safety minimums
+    if curve.steps[7] < 1 {
+        return Err(FanControlError::Platform(format!(
+            "step 7 (approaching high temp) must be >= 1 for safety, got {}",
+            curve.steps[7]
+        )));
+    }
     if curve.steps[8] < 3 {
         return Err(FanControlError::Platform(format!(
             "step 8 (high temp) must be >= 3 for safety, got {}",
@@ -889,10 +917,12 @@ mod tests {
 
     #[test]
     fn validate_custom_curve_flat_then_ramp() {
+        // Steps 0–6 may sit at 0 (fans off at idle), but step 7 now carries a
+        // floor of 1 per LLT's GodMode V1 minimum table.
         let curve = CustomFanCurve {
             fan_id: 0,
             sensor_id: 3,
-            steps: [0, 0, 0, 0, 0, 0, 0, 0, 5, 10],
+            steps: [0, 0, 0, 0, 0, 0, 0, 1, 5, 10],
         };
         assert!(validate_custom_curve(&curve).is_ok());
     }
@@ -921,10 +951,11 @@ mod tests {
 
     #[test]
     fn validate_custom_curve_step8_too_low() {
+        // Step 7 is held at its floor so this isolates the step 8 violation.
         let curve = CustomFanCurve {
             fan_id: 0,
             sensor_id: 3,
-            steps: [0, 0, 0, 0, 0, 0, 0, 0, 2, 5],
+            steps: [0, 0, 0, 0, 0, 0, 0, 1, 2, 5],
         };
         let err = validate_custom_curve(&curve).unwrap_err();
         assert!(err.to_string().contains("step 8"));
@@ -932,10 +963,11 @@ mod tests {
 
     #[test]
     fn validate_custom_curve_step9_too_low() {
+        // Step 7 is held at its floor so this isolates the step 9 violation.
         let curve = CustomFanCurve {
             fan_id: 0,
             sensor_id: 3,
-            steps: [0, 0, 0, 0, 0, 0, 0, 0, 3, 4],
+            steps: [0, 0, 0, 0, 0, 0, 0, 1, 3, 4],
         };
         let err = validate_custom_curve(&curve).unwrap_err();
         assert!(err.to_string().contains("step 9"));
@@ -1037,5 +1069,19 @@ FAN|1|4|0|31";
         assert_eq!(fans[1].id, "fan1");
         assert_eq!(fans[1].speed_rpm, 0);
         assert_eq!(fans[1].curves.len(), 1);
+    }
+
+    #[test]
+    fn validate_custom_curve_step7_too_low() {
+        // Step 7 is the lowest step carrying a floor. LLT's V1 and V2 minimum
+        // tables disagree about steps 0–6 but both require >= 1 here, so this
+        // bound holds whichever table the hardware falls under.
+        let curve = CustomFanCurve {
+            fan_id: 0,
+            sensor_id: 3,
+            steps: [0, 0, 0, 0, 0, 0, 0, 0, 3, 5],
+        };
+        let err = validate_custom_curve(&curve).unwrap_err();
+        assert!(err.to_string().contains("step 7"));
     }
 }

@@ -15,7 +15,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::*;
 
 use crate::config;
-use crate::fan::{CustomFanCurve, Fan, FanCurve};
+use crate::fan::{CustomFanCurve, Fan, FanCurve, MAX_STEP_VALUE};
 use crate::platform::create_controller;
 
 // ---------------------------------------------------------------------------
@@ -382,19 +382,49 @@ fn enforce_non_decreasing(steps: &mut [u8; 10], idx: usize) {
 
 /// Enforce safety minimums for high-temperature steps.
 ///
-/// Only propagates upward (step 8 clamp raises step 9 if needed; step 9 clamp
-/// raises nothing). Does NOT propagate backward into lower steps — a low value
-/// on step 7 is valid even if step 8 is at its minimum.
+/// Floors match LenovoLegionToolkit's GodMode V1 table
+/// `[0,0,0,0,0,0,0,1,3,5]` — steps 0–6 have a floor of zero, matching V1, while
+/// steps 7, 8 and 9 carry floors of 1, 3 and 5. Whether a step of 0 actually
+/// stops the fans is unsettled; see `validate_custom_curve` and issue #18.
+///
+/// Output is guaranteed to satisfy `validate_custom_curve`, which needs three
+/// things this function supplies in order:
+///
+/// 1. **Range.** Values above the maximum are clamped down first.
+///    `load_config` deserializes straight into `[u8; 10]` with no range check,
+///    so a hand-edited `fancontrol.json` can carry 11–255. Clamping first also
+///    stops the sweep in step 3 from propagating one bad value across the whole
+///    curve.
+/// 2. **Floors** on steps 7, 8 and 9.
+/// 3. **Non-decreasing**, restored by raising steps only, never lowering them.
+///    That direction matters: pulling a step up to its predecessor can only
+///    increase cooling, whereas lowering a predecessor to meet a step would
+///    quietly reduce it. Floors alone would not suffice —
+///    `[5,5,5,5,5,5,5,0,0,0]` clamps to `[5,5,5,5,5,5,5,1,3,5]`, which
+///    decreases at step 7 and would be rejected, leaving the editor unable to
+///    apply anything.
 fn enforce_safety_minimums(steps: &mut [u8; 10]) {
+    // 1. Range, before anything else propagates a bad value.
+    for step in steps.iter_mut() {
+        if *step > MAX_STEP_VALUE {
+            *step = MAX_STEP_VALUE;
+        }
+    }
+    if steps[7] < 1 {
+        steps[7] = 1;
+    }
     if steps[8] < 3 {
         steps[8] = 3;
     }
     if steps[9] < 5 {
         steps[9] = 5;
     }
-    // Propagate upward only: step 8's raised value must not exceed step 9.
-    if steps[9] < steps[8] {
-        steps[9] = steps[8];
+    // Restore the non-decreasing invariant by raising only. Subsumes the old
+    // step-8-into-step-9 propagation.
+    for i in 1..10 {
+        if steps[i] < steps[i - 1] {
+            steps[i] = steps[i - 1];
+        }
     }
 }
 
@@ -449,12 +479,31 @@ fn run_inner() -> Result<()> {
 
         // Load saved curves from config and apply on startup.
         let saved_config = config::load_config();
-        for curve in &saved_config.custom_curves {
+        for saved_curve in &saved_config.custom_curves {
+            // Sanitize before applying. A config written before step 7 gained a
+            // floor of 1 is still on disk for existing users, and would other-
+            // wise be rejected outright and silently dropped.
+            let mut curve = saved_curve.clone();
+            enforce_safety_minimums(&mut curve.steps);
+            if curve.steps != saved_curve.steps {
+                // Say so rather than rewriting in silence. The sanitized curve
+                // is not written back, so this recurs on every startup until the
+                // user re-saves; a visible message is what lets them notice.
+                warn!(
+                    "TUI poller: saved curve fan{}->sensor{} violates current limits, \
+                     applying adjusted steps {:?} instead of {:?}",
+                    curve.fan_id, curve.sensor_id, curve.steps, saved_curve.steps
+                );
+                let _ = tx.send(PollMsg::Error(format!(
+                    "Saved curve fan{}->sensor{} adjusted to meet safety limits",
+                    curve.fan_id, curve.sensor_id
+                )));
+            }
             info!(
                 "TUI poller: applying saved curve fan{}->sensor{}",
                 curve.fan_id, curve.sensor_id
             );
-            match ctrl.set_custom_curve(curve) {
+            match ctrl.set_custom_curve(&curve) {
                 Ok(()) => {
                     held_curves.push(curve.clone());
                     let _ = tx.send(PollMsg::CustomCurveSet {
@@ -1136,7 +1185,9 @@ fn draw_curve_editor(f: &mut Frame, app: &App, area: Rect) {
             }
 
             // Safety annotation
-            let safety = if i == 8 {
+            let safety = if i == 7 {
+                " min:1"
+            } else if i == 8 {
                 " min:3"
             } else if i == 9 {
                 " min:5"
@@ -1427,4 +1478,121 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             .border_style(Style::default().fg(VIRIDIS_BORDER)),
     );
     f.render_widget(status, area);
+}
+
+// ---------------------------------------------------------------------------
+// Tests — pure step-clamping logic, no terminal required
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::lenovo::validate_custom_curve;
+
+    // -- enforce_safety_minimums -------------------------------------------
+
+    #[test]
+    fn enforce_safety_minimums_leaves_low_steps_at_zero() {
+        // Steps 0–6 have no floor, so an idle-off curve survives untouched.
+        let mut steps = [0, 0, 0, 0, 0, 0, 0, 1, 3, 5];
+        enforce_safety_minimums(&mut steps);
+        assert_eq!(steps, [0, 0, 0, 0, 0, 0, 0, 1, 3, 5]);
+    }
+
+    #[test]
+    fn enforce_safety_minimums_raises_step7_to_one() {
+        let mut steps = [0; 10];
+        enforce_safety_minimums(&mut steps);
+        assert_eq!(steps[7], 1);
+        assert_eq!(steps[8], 3);
+        assert_eq!(steps[9], 5);
+        // Steps 0–6 stay off.
+        assert_eq!(&steps[0..7], &[0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn enforce_safety_minimums_does_not_lower_values_above_floors() {
+        let mut steps = [2, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        enforce_safety_minimums(&mut steps);
+        assert_eq!(steps, [2, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    }
+
+    #[test]
+    fn enforce_safety_minimums_propagates_step8_upward_into_step9() {
+        // Step 8 above step 9's floor must drag step 9 up to meet it.
+        let mut steps = [0, 0, 0, 0, 0, 0, 0, 1, 8, 0];
+        enforce_safety_minimums(&mut steps);
+        assert_eq!(steps[8], 8);
+        assert_eq!(steps[9], 8);
+    }
+
+    #[test]
+    fn enforce_safety_minimums_restores_monotonicity_by_raising() {
+        // Clamping the floors alone would leave [5,5,5,5,5,5,5,1,3,5], which
+        // decreases at step 7 and would be rejected by validate_custom_curve.
+        // The invariant is restored upward, so cooling is never reduced.
+        let mut steps = [5, 5, 5, 5, 5, 5, 5, 0, 0, 0];
+        enforce_safety_minimums(&mut steps);
+        assert_eq!(steps, [5, 5, 5, 5, 5, 5, 5, 5, 5, 5]);
+    }
+
+    #[test]
+    fn enforce_safety_minimums_raises_a_decreasing_curve() {
+        let mut steps = [5, 4, 3, 2, 1, 1, 1, 1, 3, 5];
+        enforce_safety_minimums(&mut steps);
+        assert_eq!(steps, [5, 5, 5, 5, 5, 5, 5, 5, 5, 5]);
+    }
+
+    #[test]
+    fn enforce_safety_minimums_output_is_accepted_by_the_real_validator() {
+        // Asserts the round trip against validate_custom_curve itself rather
+        // than a hand-copy of its rules — re-implementing them here is the same
+        // drift that let the doc comment and the code disagree in the first
+        // place.
+        //
+        // Values above MAX_STEP_VALUE are included deliberately: load_config
+        // deserializes straight into [u8; 10] with no range check, so a
+        // hand-edited fancontrol.json can carry them, and without the clamp the
+        // raising sweep propagates one bad value across the whole curve.
+        let interesting = [0u8, 1, 3, 5, 10, 11, 200, 255];
+        for &low in &interesting {
+            for &high in &interesting {
+                for split in 0..10usize {
+                    let mut steps = [low; 10];
+                    for slot in steps.iter_mut().skip(split) {
+                        *slot = high;
+                    }
+                    let input = steps;
+                    enforce_safety_minimums(&mut steps);
+
+                    let curve = CustomFanCurve {
+                        fan_id: 0,
+                        sensor_id: 3,
+                        steps,
+                    };
+                    assert!(
+                        validate_custom_curve(&curve).is_ok(),
+                        "sanitized output rejected: {input:?} -> {steps:?}, err={:?}",
+                        validate_custom_curve(&curve).unwrap_err()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn enforce_safety_minimums_clamps_out_of_range_into_the_valid_range() {
+        // A garbage value is clamped to the maximum rather than left to be
+        // rejected. Note what raise-only then implies: a high early step legally
+        // pulls the whole curve up to meet it, so one bad low step does become
+        // full speed everywhere. That is the safe direction and it validates,
+        // but it is a rewrite of the user's curve, not a surgical repair.
+        let mut steps = [200, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        enforce_safety_minimums(&mut steps);
+        assert_eq!(steps, [10, 10, 10, 10, 10, 10, 10, 10, 10, 10]);
+
+        let mut steps = [0, 0, 0, 0, 0, 0, 0, 0, 0, 255];
+        enforce_safety_minimums(&mut steps);
+        assert_eq!(steps, [0, 0, 0, 0, 0, 0, 0, 1, 3, 10]);
+    }
 }
