@@ -1,3 +1,12 @@
 /target
 scripts/*.log
 site/node_modules/
+
+# Session handoff file, written and consumed locally
+CONTINUE_HERE.md
+
+# Machine-local symlinks into the user's global agents/skills. Scoped to these
+# two entries so shareable project config (.claude/settings.json, commands/)
+# can still be committed.
+/.claude/agents
+/.claude/skills
