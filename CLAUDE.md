@@ -85,3 +85,37 @@ Working on test hardware (Legion 82RG):
 Firmware stubs (return empty data): `Fan_Get_MaxSpeed`, `Fan_Get_Table`
 
 Untested/deferred: `Fan_Set_Table`, `Fan_Set_MaxSpeed`
+
+Absent entirely on this firmware: `LENOVO_OTHER_METHOD.GetFeatureValue`. LLT's
+preferred capability accessor does not exist here ("property not found"), so the
+older per-feature methods are the working path — `GetSupportThermalMode` and
+`Get_Support_LegionZone_Version` both succeed.
+
+### GodMode version: V1 (measured 2026-08-12, issue #25)
+
+Determined by `tools/Get-GodModeVersion.ps1`:
+
+| Input | Value |
+|---|---|
+| `SmartFanVersion` (`IsSupportSmartFan` → `Data`) | **5** → V1 range (4 or 5) |
+| `LegionZoneVersion` (`Get_Support_LegionZone_Version` → `Version`) | **2** → V1 range (1 or 2) |
+| Power mode mask (`GetSupportThermalMode` → `mode`) | **65543** = `0x10007`; bit 16 set, so GodMode is supported |
+| BIOS | `JUCN68WW` → prefix `JUCN`, version `68`; not in LLT's V1 blocklist, so the gate passes |
+
+**This machine is GodMode V1**, so the minimum step table is
+`[0,0,0,0,0,0,0,1,3,5]` and fancontrol's floors in `validate_custom_curve` are
+correct. Steps 0–6 may legally be 0.
+
+### Fan table properties, per (Fan_Id, Sensor_ID)
+
+All three entries report `FanTable_Len = 10`, `CurrentFanMinSpeed = 1600`,
+`CurrentFanMaxSpeed = 4800`. **`DefaultFanMaxSpeed` does not exist** on this
+firmware, so LLT's `GetDefaultFanMaxSpeedAsync` would fail here;
+`CurrentFanMaxSpeed` is the usable source and makes the stubbed
+`Fan_Get_MaxSpeed` unnecessary.
+
+Note for issue #18: the table holds **10** entries (indices 0–9) while
+`MAX_STEP_VALUE` of 10 admits **11** distinct step values. A direct-index reading
+leaves step 10 out of bounds, which favours "0 = off, steps 1–10 map to entries
+0–9" over the reading in `CustomFanCurve`'s doc comment. Suggestive, not proof —
+the load test in #18 decides.

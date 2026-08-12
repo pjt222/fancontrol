@@ -84,6 +84,27 @@ function Write-WmiProperties {
 # Environment
 # ---------------------------------------------------------------------------
 
+function Get-WmiPropertyOrNull {
+    <#
+    .SYNOPSIS
+    Read a WMI property by name, returning $null when it does not exist.
+    .DESCRIPTION
+    Required because tools here run under Set-StrictMode -Version Latest, where
+    $object.MissingProperty is a terminating error rather than $null. Firmware
+    varies in which properties it exposes -- the 82RG's LENOVO_FAN_TABLE_DATA has
+    CurrentFanMaxSpeed but no DefaultFanMaxSpeed -- so probing for a property that
+    may be absent must not abort the run.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowNull()]$InputObject,
+        [Parameter(Mandatory)][string]$Name
+    )
+    if ($null -eq $InputObject) { return $null }
+    $property = $InputObject.Properties | Where-Object { $_.Name -eq $Name }
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
+
 function Test-Elevated {
     <#
     .SYNOPSIS
@@ -161,7 +182,14 @@ function Invoke-LenovoWmiMethod {
     PowerShell's adapted call for parameterless methods where that path is not
     available.
     .PARAMETER Arguments
-    Hashtable of WMI parameter name to value, e.g. @{ IDs = 0x00070000 }.
+    Hashtable of WMI parameter name to value, e.g. @{ IDs = 0x00070000 }. Used by
+    the GetMethodParameters path.
+    .PARAMETER PositionalArguments
+    Same values in declaration order, for the adapted-call fallback. Supply both
+    for any method taking arguments: GetMethodParameters is not available for
+    every method on every firmware -- LENOVO_OTHER_METHOD.GetFeatureValue on the
+    82RG is one that fails -- and without positional values such a method cannot
+    be called at all.
     .PARAMETER AsObject
     Return the whole output object rather than a single property.
     #>
@@ -174,6 +202,7 @@ function Invoke-LenovoWmiMethod {
         [Parameter(Mandatory)][AllowNull()]$WmiObject,
         [Parameter(Mandatory)][string]$Method,
         [hashtable]$Arguments = @{},
+        [object[]]$PositionalArguments = @(),
         [Parameter(Mandatory)][string]$Property,
         [switch]$AsObject
     )
@@ -196,10 +225,19 @@ function Invoke-LenovoWmiMethod {
             }
             $result = $WmiObject.InvokeMethod($Method, $inParams, $null)
         } else {
-            if ($Arguments.Count -gt 0) {
-                throw "cannot pass named arguments to $Method -- GetMethodParameters unavailable"
+            # GetMethodParameters is unavailable for some methods on some
+            # firmware. Fall back to PowerShell's adapted call, which needs the
+            # arguments positionally.
+            $positional = $PositionalArguments
+            if ($positional.Count -eq 0 -and $Arguments.Count -eq 1) {
+                $positional = @($Arguments.Values)[0]
+                $positional = @($positional)
             }
-            $result = $WmiObject.$Method()
+            if ($positional.Count -ne $Arguments.Count) {
+                throw ("cannot call " + $Method + " -- GetMethodParameters unavailable and no PositionalArguments supplied")
+            }
+            Write-ToolLog ("  (GetMethodParameters unavailable for " + $Method + ", using adapted call)")
+            $result = $WmiObject.$Method.Invoke($positional)
         }
 
         Write-ToolLog ("  " + $Method + "() output:")
@@ -219,4 +257,5 @@ function Invoke-LenovoWmiMethod {
 }
 
 Export-ModuleMember -Function Start-ToolLog, Write-ToolLog, Write-WmiProperties,
-    Test-Elevated, Get-LenovoBiosVersion, Get-LenovoWmiClass, Invoke-LenovoWmiMethod
+    Get-WmiPropertyOrNull, Test-Elevated, Get-LenovoBiosVersion, Get-LenovoWmiClass,
+    Invoke-LenovoWmiMethod

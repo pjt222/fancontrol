@@ -114,27 +114,30 @@ Write-ToolLog "--- LENOVO_OTHER_METHOD ---"
 $otherMethod = Get-LenovoWmiClass -ClassName 'LENOVO_OTHER_METHOD' -Single
 
 $powerModeMask = Invoke-LenovoWmiMethod -WmiObject $otherMethod -Method 'GetFeatureValue' `
-    -Arguments @{ IDs = 0x00070000 } -Property 'Value'
+    -Arguments @{ IDs = 0x00070000 } -PositionalArguments @(0x00070000) -Property 'Value'
+
+if ($null -eq $powerModeMask) {
+    Write-ToolLog "  GetFeatureValue(SupportedPowerModes) unavailable, trying GetSupportThermalMode"
+    # Same bit layout, so the same decode applies to either source.
+    $powerModeMask = Invoke-LenovoWmiMethod -WmiObject $otherMethod `
+        -Method 'GetSupportThermalMode' -Property 'mode'
+}
 
 $godModeSupported = $false
 if ($null -ne $powerModeMask) {
     $mask = [int]$powerModeMask
-    Write-ToolLog ("  SupportedPowerModes bitmask = " + $mask)
+    Write-ToolLog ("  Power mode bitmask = " + $mask)
     Write-ToolLog ("    bit 0  Quiet       = " + [bool]($mask -band 1))
     Write-ToolLog ("    bit 1  Balance     = " + [bool]($mask -band 2))
     Write-ToolLog ("    bit 2  Performance = " + [bool]($mask -band 4))
     $godModeSupported = [bool]($mask -band 65536)
     Write-ToolLog ("    bit 16 GodMode     = " + $godModeSupported)
 } else {
-    Write-ToolLog "  GetFeatureValue(SupportedPowerModes) unavailable, trying GetSupportThermalMode"
-    $thermalMask = Invoke-LenovoWmiMethod -WmiObject $otherMethod -Method 'GetSupportThermalMode' -Property 'mode'
-    if ($null -ne $thermalMask) {
-        Write-ToolLog ("  Thermal mode bitmask = " + [int]$thermalMask)
-    }
+    Write-ToolLog "  WARNING: no power mode bitmask available from either method"
 }
 
 $legionZoneVersion = Invoke-LenovoWmiMethod -WmiObject $otherMethod -Method 'GetFeatureValue' `
-    -Arguments @{ IDs = 0x00090000 } -Property 'Value'
+    -Arguments @{ IDs = 0x00090000 } -PositionalArguments @(0x00090000) -Property 'Value'
 if ($null -eq $legionZoneVersion) {
     Write-ToolLog "  Falling back to Get_Support_LegionZone_Version"
     $legionZoneVersion = Invoke-LenovoWmiMethod -WmiObject $otherMethod `
@@ -156,11 +159,32 @@ if ($tables) {
     foreach ($table in $tables) {
         Write-ToolLog ("  --- Fan_Id=" + $table.Fan_Id + " Sensor_ID=" + $table.Sensor_ID + " ---")
         Write-WmiProperties $table
+        # Read through Get-WmiPropertyOrNull: DefaultFanMaxSpeed is absent on the
+        # 82RG, and under Set-StrictMode a direct access would abort the run.
         $maxSpeeds += [pscustomobject]@{
-            FanId               = $table.Fan_Id
-            SensorId            = $table.Sensor_ID
-            CurrentFanMaxSpeed  = $table.CurrentFanMaxSpeed
-            DefaultFanMaxSpeed  = $table.DefaultFanMaxSpeed
+            FanId              = Get-WmiPropertyOrNull $table 'Fan_Id'
+            SensorId           = Get-WmiPropertyOrNull $table 'Sensor_ID'
+            CurrentFanMinSpeed = Get-WmiPropertyOrNull $table 'CurrentFanMinSpeed'
+            CurrentFanMaxSpeed = Get-WmiPropertyOrNull $table 'CurrentFanMaxSpeed'
+            DefaultFanMaxSpeed = Get-WmiPropertyOrNull $table 'DefaultFanMaxSpeed'
+            FanTableLen        = Get-WmiPropertyOrNull $table 'FanTable_Len'
+        }
+    }
+
+    # Step-scale observation, relevant to issue #18. fancontrol allows step values
+    # 0..MAX_STEP_VALUE (10), which is eleven distinct values, while the firmware
+    # table holds FanTable_Len entries. If the table has ten, the counts do not
+    # line up under a direct-index reading, and "0 = off, 1..10 index the ten
+    # entries" fits. Suggestive, not proof -- the load test in #18 decides.
+    $firstLen = Get-WmiPropertyOrNull $tables[0] 'FanTable_Len'
+    if ($null -ne $firstLen) {
+        Write-ToolLog ""
+        Write-ToolLog ("  FanTable_Len = " + $firstLen + " entries, indices 0.." + ([int]$firstLen - 1))
+        Write-ToolLog "  fancontrol step range = 0..10, i.e. 11 distinct values"
+        if ([int]$firstLen -eq 10) {
+            Write-ToolLog "  => 11 step values over a 10-entry table. A direct-index reading"
+            Write-ToolLog "     leaves step 10 out of bounds, which favours 0 = off with"
+            Write-ToolLog "     steps 1..10 mapping to entries 0..9. See issue #18."
         }
     }
 }
