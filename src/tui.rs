@@ -386,10 +386,16 @@ fn enforce_non_decreasing(steps: &mut [u8; 10], idx: usize) {
 /// `[0,0,0,0,0,0,0,1,3,5]` — steps 0–6 may stay at 0, so the fans can idle
 /// off, while steps 7, 8 and 9 carry floors of 1, 3 and 5.
 ///
-/// Only propagates upward (step 8 clamp raises step 9 if needed; step 9 clamp
-/// raises nothing). Does NOT propagate backward into lower steps — a low value
-/// on step 7 stays valid with step 8 at its minimum, since step 7's floor of 1
-/// sits below step 8's floor of 3.
+/// After clamping, the non-decreasing invariant is restored by raising steps
+/// only, never lowering them. That direction matters: pulling a step up to its
+/// predecessor can only ever increase cooling, whereas lowering a predecessor
+/// to meet a step would quietly reduce it.
+///
+/// Raising is also what makes this function's output always acceptable to
+/// `validate_custom_curve`, which rejects decreasing curves. Clamping the
+/// floors alone does not: `[5,5,5,5,5,5,5,0,0,0]` clamps to
+/// `[5,5,5,5,5,5,5,1,3,5]`, which decreases at step 7 and would be rejected,
+/// leaving the editor unable to apply anything.
 fn enforce_safety_minimums(steps: &mut [u8; 10]) {
     if steps[7] < 1 {
         steps[7] = 1;
@@ -400,9 +406,12 @@ fn enforce_safety_minimums(steps: &mut [u8; 10]) {
     if steps[9] < 5 {
         steps[9] = 5;
     }
-    // Propagate upward only: step 8's raised value must not exceed step 9.
-    if steps[9] < steps[8] {
-        steps[9] = steps[8];
+    // Restore the non-decreasing invariant by raising only. Subsumes the old
+    // step-8-into-step-9 propagation.
+    for i in 1..10 {
+        if steps[i] < steps[i - 1] {
+            steps[i] = steps[i - 1];
+        }
     }
 }
 
@@ -1490,17 +1499,47 @@ mod tests {
     }
 
     #[test]
-    fn enforce_safety_minimums_output_passes_validation_floors() {
-        // Whatever goes in, the three floors hold on the way out.
-        for seed in 0u8..=10 {
-            let mut steps = [seed; 10];
-            steps[7] = 0;
-            steps[8] = 0;
-            steps[9] = 0;
-            enforce_safety_minimums(&mut steps);
-            assert!(steps[7] >= 1, "step 7 floor violated for seed {seed}");
-            assert!(steps[8] >= 3, "step 8 floor violated for seed {seed}");
-            assert!(steps[9] >= 5, "step 9 floor violated for seed {seed}");
+    fn enforce_safety_minimums_restores_monotonicity_by_raising() {
+        // Clamping the floors alone would leave [5,5,5,5,5,5,5,1,3,5], which
+        // decreases at step 7 and would be rejected by validate_custom_curve.
+        // The invariant is restored upward, so cooling is never reduced.
+        let mut steps = [5, 5, 5, 5, 5, 5, 5, 0, 0, 0];
+        enforce_safety_minimums(&mut steps);
+        assert_eq!(steps, [5, 5, 5, 5, 5, 5, 5, 5, 5, 5]);
+    }
+
+    #[test]
+    fn enforce_safety_minimums_raises_a_decreasing_curve() {
+        let mut steps = [5, 4, 3, 2, 1, 1, 1, 1, 3, 5];
+        enforce_safety_minimums(&mut steps);
+        assert_eq!(steps, [5, 5, 5, 5, 5, 5, 5, 5, 5, 5]);
+    }
+
+    #[test]
+    fn enforce_safety_minimums_output_always_satisfies_validation() {
+        // Exhaustive over the low/high split: whatever goes in, the output must
+        // satisfy every rule validate_custom_curve enforces — the three floors,
+        // the 0–10 range, AND non-decreasing. The last is the one that clamping
+        // floors alone does not give you.
+        for low in 0u8..=10 {
+            for high in 0u8..=10 {
+                let mut steps = [low; 10];
+                steps[7] = high;
+                steps[8] = high;
+                steps[9] = high;
+                enforce_safety_minimums(&mut steps);
+
+                let ctx = format!("low={low} high={high} -> {steps:?}");
+                assert!(steps[7] >= 1, "step 7 floor violated: {ctx}");
+                assert!(steps[8] >= 3, "step 8 floor violated: {ctx}");
+                assert!(steps[9] >= 5, "step 9 floor violated: {ctx}");
+                for (i, &step) in steps.iter().enumerate() {
+                    assert!(step <= 10, "step {i} above max: {ctx}");
+                }
+                for i in 1..10 {
+                    assert!(steps[i] >= steps[i - 1], "decreasing at step {i}: {ctx}");
+                }
+            }
         }
     }
 }
