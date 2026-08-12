@@ -44,12 +44,24 @@ src/
     ├── linux.rs     # sysfs/hwmon backend
     ├── windows.rs   # Generic WMI backend (Win32_Fan) + is_lenovo() detection
     └── lenovo.rs    # Lenovo Legion backend (LENOVO_FAN_METHOD via PowerShell)
-scripts/
+scripts/                    # One-off probes, kept for their logs
 ├── probe-wmi-methods.ps1   # WMI method probe (run on native Windows)
 ├── dump-fan-table.ps1      # Full fan table dump
+├── probe-set-table.ps1     # Fan_Set_Table write probe
 ├── probe-wmi-methods.log   # Probe results
 └── dump-fan-table.log      # Table dump results
+tools/                      # Reusable tooling — prefer adding here
+├── README.md               # Conventions and a template for new tools
+├── LenovoWmi.psm1          # Shared module: logging, elevation, BIOS parsing, root\WMI access
+└── Get-GodModeVersion.ps1  # GodMode V1/V2 detection + fan max-speed properties (#25)
 ```
+
+**`scripts/` vs `tools/`**: `scripts/` holds historical one-off probes; do not
+extend them. New Windows tooling goes in `tools/`, built on `LenovoWmi.psm1` so
+the logging and WMI-access conventions stay in one place. See `tools/README.md`
+for the conventions, each of which exists because it already cost a debugging
+session — ASCII-only for PowerShell 5.1, named output properties rather than
+`.ReturnValue`, and so on.
 
 **Key pattern**: `FanController` trait in `platform/mod.rs` is the core abstraction. `create_controller()` returns `Box<dyn FanController>` using `#[cfg(target_os)]` to select the platform backend at compile time.
 

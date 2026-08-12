@@ -1,5 +1,6 @@
 /target
 scripts/*.log
+tools/*.log
 site/node_modules/
 
 # Session handoff file, written and consumed locally
