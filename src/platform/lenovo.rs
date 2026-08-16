@@ -376,12 +376,17 @@ fn encode_fan_table_bytes(curve: &CustomFanCurve) -> [u8; FAN_TABLE_BUFFER_SIZE]
 ///
 /// LLT keeps a second, stricter table for GodMode V2 —
 /// `[1,1,1,1,1,1,1,1,3,5]`, which forbids 0 anywhere — and selects between
-/// them by SmartFan/LegionZone version. Which table the 82RG falls under is
-/// still unconfirmed (see issue #18), so we take V1's, the more permissive of
-/// the two. Permissive-first is deliberate: if the hardware turns out to be V2,
-/// the firmware rejects the curve and the user sees an error at the WMI
-/// boundary, which is a better failure than silently refusing curves the
-/// hardware would have accepted.
+/// them by SmartFan/LegionZone version. **The 82RG is V1**, measured for
+/// issue #25 on 2026-08-12: `SmartFanVersion = 5` and `LegionZoneVersion = 2`
+/// both land in V1's range independently, the power-mode mask `0x10007` has
+/// bit 16 set so GodMode is supported, and BIOS `JUCN68WW` is outside LLT's
+/// V1 blocklist. Taking V1's table is therefore the measured choice on this
+/// hardware, not a permissive default.
+///
+/// It remains the safer choice on hardware this has not been measured on: if
+/// such a machine turns out to be V2, the firmware rejects the curve and the
+/// user sees an error at the WMI boundary, which is a better failure than
+/// silently refusing curves the hardware would have accepted.
 ///
 /// **What the step 7 floor does and does not claim.** Both tables require ≥ 1
 /// at step 7, which is the whole justification for enforcing it now — it is
