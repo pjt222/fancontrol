@@ -41,6 +41,21 @@ when the change landed on `main`.
   that hardware; models whose curve does not span the fan's full range get
   correct PWM conversion instead of an approximation.
 
+- **Saved curves that fail the safety limits are adjusted in memory, never on
+  disk.** *(2026-08-16)*
+
+  `fancontrol.json` is authoritative. A saved curve outside the current limits
+  is sanitized before being applied, and the adjustment is reported once per
+  session with the path to the file, but the file is left unchanged until you
+  save deliberately (`s` in the TUI).
+
+  Writing the repair back was considered and rejected: sanitizing restores the
+  non-decreasing invariant by raising, so `[5,4,3,2,1,1,1,1,3,5]` becomes
+  `[5,5,5,5,5,5,5,5,5,5]` — near-full speed in every band. Overwriting a
+  hand-edited file with a rewrite that drastic needs consent. The cost is that
+  an unfixed config is adjusted again on every launch, which is visible and
+  reversible where a silent overwrite would be neither.
+
 ### Added
 
 - Custom fan curve support for Lenovo Legion via `Fan_Set_Table`, with config

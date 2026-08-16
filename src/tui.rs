@@ -380,6 +380,32 @@ fn enforce_non_decreasing(steps: &mut [u8; 10], idx: usize) {
     }
 }
 
+// --- Persistence policy for saved curves that fail the safety limits -------
+//
+// THE CONFIG FILE IS AUTHORITATIVE AND IS NEVER REWRITTEN AUTOMATICALLY.
+//
+// A curve loaded from `fancontrol.json` is sanitized in memory, applied, and
+// the user is told once per session that this happened and where the file is.
+// The file itself is left alone until the user saves deliberately, with `s`.
+//
+// The alternative -- writing the sanitized curve back once -- was considered
+// and rejected. Sanitizing restores the non-decreasing invariant by raising, so
+// the repair is not always cosmetic: `[5,4,3,2,1,1,1,1,3,5]` becomes
+// `[5,5,5,5,5,5,5,5,5,5]`, near-full speed in every band. Writing that back
+// would overwrite the user's stated intent with a machine rewrite of it, in a
+// file they hand-edited, without asking. Config files are user data; a repair
+// that drastic needs consent, and the `s` key already provides it.
+//
+// The recurrence is the accepted cost: an unfixed config is adjusted again on
+// every launch. That is a visible, reversible annoyance, where a silent
+// overwrite would be an invisible, irreversible one.
+//
+// This also keeps the two entry points consistent in spirit. The CLI rejects
+// explicit input outright rather than adjusting it, because the user is right
+// there to fix it. The TUI adjusts rather than refusing to start, because
+// refusing to start over a stale file is the worse failure -- but neither of
+// them edits the user's file on their behalf.
+
 /// Enforce safety minimums for high-temperature steps.
 ///
 /// Floors are read from [`MINIMUM_STEPS`], the same constant the validator
@@ -475,6 +501,9 @@ fn run_inner() -> Result<()> {
         let mut held_curves: Vec<CustomFanCurve> = Vec::new();
 
         // Load saved curves from config and apply on startup.
+        //
+        // Persistence policy: the config file is authoritative and is never
+        // rewritten behind the user's back. See `SANITIZE_POLICY` below.
         let saved_config = config::load_config();
         for saved_curve in &saved_config.custom_curves {
             // Sanitize before applying. A config written before step 7 gained a
@@ -483,16 +512,21 @@ fn run_inner() -> Result<()> {
             let mut curve = saved_curve.clone();
             enforce_safety_minimums(&mut curve.steps);
             if curve.steps != saved_curve.steps {
-                // Say so rather than rewriting in silence. The sanitized curve
-                // is not written back, so this recurs on every startup until the
-                // user re-saves; a visible message is what lets them notice.
+                // Say so rather than rewriting in silence, and name the file so
+                // the user can find the curve being overridden. This runs once
+                // per session, before the poll loop, not once per poll cycle.
                 warn!(
-                    "TUI poller: saved curve fan{}->sensor{} violates current limits, \
-                     applying adjusted steps {:?} instead of {:?}",
-                    curve.fan_id, curve.sensor_id, curve.steps, saved_curve.steps
+                    "TUI poller: saved curve fan{}->sensor{} in {} violates current limits, \
+                     applying adjusted steps {:?} instead of {:?}; file left unchanged",
+                    curve.fan_id,
+                    curve.sensor_id,
+                    config::config_path().display(),
+                    curve.steps,
+                    saved_curve.steps
                 );
                 let _ = tx.send(PollMsg::Error(format!(
-                    "Saved curve fan{}->sensor{} adjusted to meet safety limits",
+                    "Saved curve fan{}->sensor{} adjusted to meet safety limits \
+                     (config not modified; press s to keep the adjustment)",
                     curve.fan_id, curve.sensor_id
                 )));
             }
@@ -1538,6 +1572,63 @@ mod tests {
         let mut steps = [5, 4, 3, 2, 1, 1, 1, 1, 3, 5];
         enforce_safety_minimums(&mut steps);
         assert_eq!(steps, [5, 5, 5, 5, 5, 5, 5, 5, 5, 5]);
+    }
+
+    #[test]
+    fn loading_a_bad_curve_sanitizes_it_without_touching_the_file() {
+        // The load -> sanitize -> apply round trip under the chosen policy.
+        // Because the policy is "never rewrite the config", the thing worth
+        // asserting is the negative: the bytes on disk are identical after the
+        // curve has been read and repaired. A test that only checked the
+        // sanitized value would pass just as well under a silent-overwrite
+        // implementation, which is the behaviour being ruled out.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fancontrol.json");
+
+        // Steps 7-9 below their floors, decreasing, and out of range at the
+        // end: every rule the sanitizer knows about, in one curve.
+        let original_json = r#"{
+  "custom_curves": [
+    {
+      "fan_id": 0,
+      "sensor_id": 3,
+      "steps": [5, 4, 3, 2, 0, 0, 0, 0, 0, 255]
+    }
+  ],
+  "auto_smart_fan_mode": true
+}"#;
+        std::fs::write(&path, original_json).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let loaded: config::Config =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let saved_curve = loaded.custom_curves[0].clone();
+        assert!(
+            validate_custom_curve(&saved_curve).is_err(),
+            "fixture must actually be invalid, or this test proves nothing"
+        );
+
+        let mut steps = saved_curve.steps;
+        enforce_safety_minimums(&mut steps);
+
+        let repaired = CustomFanCurve {
+            fan_id: saved_curve.fan_id,
+            sensor_id: saved_curve.sensor_id,
+            steps,
+        };
+        assert!(
+            validate_custom_curve(&repaired).is_ok(),
+            "sanitized curve must be applicable: {:?}",
+            validate_custom_curve(&repaired)
+        );
+        assert_ne!(steps, saved_curve.steps, "the fixture should have changed");
+
+        // The point of the whole test.
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "config file must not be rewritten when a saved curve is sanitized"
+        );
     }
 
     #[test]
