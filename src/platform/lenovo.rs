@@ -171,10 +171,15 @@ fn merge_range(slot: &mut FanRpmRange, candidate: &FanRpmRange) {
 /// Aggregate per-fan RPM ranges from parsed table entries.
 ///
 /// The two sources are tiered, never blended: if any entry for a fan carries a
-/// firmware-reported range, only firmware ranges are merged for that fan. A
-/// table span may not widen a firmware range, because writing a custom curve
-/// rewrites `FanTable_Data` — a curve whose low steps sit at 0 would otherwise
-/// drag the fan's minimum to 0 and corrupt every later PWM conversion.
+/// firmware-reported range, only firmware ranges are merged for that fan, and a
+/// table span may not widen it.
+///
+/// The reason is provenance, not a known failure. `CurrentFanMinSpeed` and
+/// `CurrentFanMaxSpeed` are the firmware stating what the fan can do. A table
+/// span is an inference from curve data about what one curve happens to reach,
+/// and on a model whose curve does not span the fan's full range the two
+/// legitimately differ — which is the whole point of reading the firmware
+/// values. Merging them would yield a range that is neither source's claim.
 ///
 /// Fans with no firmware range fall back to the span of their own table data,
 /// which is still live and model-specific. `DEFAULT_MIN_RPM`/`DEFAULT_MAX_RPM`
@@ -971,8 +976,9 @@ mod tests {
 
     #[test]
     fn build_fan_ranges_prefers_firmware_over_table_span() {
-        // A custom curve can rewrite FanTable_Data far below what the fan can
-        // actually run at. The firmware range must not be widened by it.
+        // A curve that does not reach the fan's floor must not lower the range
+        // the firmware itself reported. Modelled here as a span starting at 0,
+        // the widest possible disagreement between the two sources.
         let output = "\
 TABLE|0|3|1|0|3000|58|100|0,3000|58,100|1600|4800
 TABLE|0|0|0|0|2000|58|100|0,2000|58,100|1600|4800";
