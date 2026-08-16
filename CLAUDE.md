@@ -35,10 +35,12 @@ cargo build --release --target x86_64-pc-windows-gnu
 ```
 src/
 ├── main.rs          # Entry point, CLI dispatch, logging setup
-├── cli.rs           # clap-derived CLI: list, get, set, monitor, table, gui
-├── fan.rs           # Fan, FanCurve, FanCurvePoint structs
+├── cli.rs           # clap-derived CLI: list, get, set, monitor, table, set-curve, tui, gui
+├── fan.rs           # Fan/FanCurve/CustomFanCurve structs, MINIMUM_STEPS, validate_custom_curve
+├── config.rs        # fancontrol.json load/save; reports out-of-limit saved curves by path
 ├── errors.rs        # FanControlError enum (thiserror-based)
 ├── gui.rs           # egui/eframe GUI with worker thread
+├── tui.rs           # ratatui dashboard, curve editor, enforce_safety_minimums
 └── platform/
     ├── mod.rs       # FanController trait + create_controller() factory
     ├── linux.rs     # sysfs/hwmon backend
@@ -62,6 +64,22 @@ the logging and WMI-access conventions stay in one place. See `tools/README.md`
 for the conventions, each of which exists because it already cost a debugging
 session — ASCII-only for PowerShell 5.1, named output properties rather than
 `.ReturnValue`, and so on.
+
+**Curve step limits live in one place.** `fan::MINIMUM_STEPS` (`[0,0,0,0,0,0,0,1,3,5]`,
+LLT's GodMode V1 table) is the single definition of the per-step floors, and
+both `validate_custom_curve` (which rejects) and the TUI's
+`enforce_safety_minimums` (which repairs) read it. Do not re-state the floors
+anywhere else — writing them twice is what let a doc comment and its code
+disagree before #26.
+
+The step 7 error string is quoted verbatim in `README.md` and `CHANGELOG.md` as
+a breaking-change signature, and a test in `fan.rs` asserts it exactly. Rewording
+it fails the build, by design.
+
+**Saved curves are never rewritten on disk.** `fancontrol.json` is
+authoritative; an out-of-limit curve is sanitized in memory and reported by
+path, not corrected in the file. Rationale in the policy note above
+`enforce_safety_minimums` in `src/tui.rs` (#27).
 
 **Key pattern**: `FanController` trait in `platform/mod.rs` is the core abstraction. `create_controller()` returns `Box<dyn FanController>` using `#[cfg(target_os)]` to select the platform backend at compile time.
 
