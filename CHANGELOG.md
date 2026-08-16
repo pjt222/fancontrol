@@ -51,6 +51,11 @@ when the change landed on `main`.
 
 ### Fixed
 
+- An inverted RPM range no longer panics the PWM conversion. *(2026-08-16)*
+  `pwm_to_rpm` computed `max_rpm - min_rpm` on `u32`, which underflows when
+  `min > max` — reachable from a `TABLE|` line whose two speed fields parse
+  unevenly. The conversions are now total; a degenerate range yields the
+  conservative end.
 - Curve sanitization in the TUI restores monotonicity by raising values only,
   clamps out-of-range steps, and is guaranteed to produce curves the validator
   accepts. Previously a saved config that violated the limits was dropped.
