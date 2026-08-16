@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 
-use crate::fan::CustomFanCurve;
+use crate::fan::{validate_custom_curve, CustomFanCurve};
 
 /// Persistent configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,13 +48,46 @@ pub fn config_path() -> PathBuf {
         .join("fancontrol.json")
 }
 
+/// Report saved curves that fail the current safety limits, naming the file.
+///
+/// `Config` deserializes straight into `[u8; 10]`, so a hand-edited file can
+/// carry any value from 0 to 255 and any ordering. Nothing here rejects or
+/// repairs those — that is the caller's business, and the TUI sanitizes them
+/// before applying. The point is that the user learns *which file* holds the
+/// offending curve, from whichever front-end they happen to be running, rather
+/// than only from the TUI's status line.
+///
+/// The config is deliberately not corrected on disk; see the persistence policy
+/// note above `enforce_safety_minimums` in `src/tui.rs`.
+///
+/// Returns how many curves were reported, so the behaviour is testable rather
+/// than only observable in the log.
+fn report_invalid_curves(config: &Config, path: &std::path::Path) -> usize {
+    let mut reported = 0;
+    for curve in &config.custom_curves {
+        if let Err(error) = validate_custom_curve(curve) {
+            reported += 1;
+            warn!(
+                "Saved curve fan{}->sensor{} in {} is outside current safety limits ({}). \
+                 It will be adjusted in memory before use; the file is left unchanged.",
+                curve.fan_id,
+                curve.sensor_id,
+                path.display(),
+                error
+            );
+        }
+    }
+    reported
+}
+
 /// Load configuration from disk. Returns defaults on any error.
 pub fn load_config() -> Config {
     let path = config_path();
     match std::fs::read_to_string(&path) {
-        Ok(contents) => match serde_json::from_str(&contents) {
+        Ok(contents) => match serde_json::from_str::<Config>(&contents) {
             Ok(config) => {
                 info!("Loaded config from {}", path.display());
+                let _ = report_invalid_curves(&config, &path);
                 config
             }
             Err(error) => {
@@ -118,6 +151,55 @@ mod tests {
         // config_path() points to exe dir — won't exist in test environment
         let config = load_config();
         assert!(config.custom_curves.is_empty());
+    }
+
+    #[test]
+    fn report_invalid_curves_counts_only_the_invalid() {
+        let config = Config {
+            custom_curves: vec![
+                // Valid: meets every floor and is non-decreasing.
+                CustomFanCurve {
+                    fan_id: 0,
+                    sensor_id: 3,
+                    steps: [0, 0, 0, 0, 0, 0, 0, 1, 3, 5],
+                },
+                // Invalid: step 7 below its floor of 1.
+                CustomFanCurve {
+                    fan_id: 1,
+                    sensor_id: 4,
+                    steps: [0, 0, 0, 0, 0, 0, 0, 0, 3, 5],
+                },
+                // Invalid: out of range, the hand-edited-file case.
+                CustomFanCurve {
+                    fan_id: 2,
+                    sensor_id: 5,
+                    steps: [255, 255, 255, 255, 255, 255, 255, 255, 255, 255],
+                },
+            ],
+            auto_smart_fan_mode: true,
+        };
+        assert_eq!(
+            report_invalid_curves(&config, std::path::Path::new("/tmp/fancontrol.json")),
+            2
+        );
+    }
+
+    #[test]
+    fn report_invalid_curves_is_silent_on_a_clean_config() {
+        // Positive control for the test above: the same call must return 0
+        // when nothing is wrong, or the count proves nothing.
+        let config = Config {
+            custom_curves: vec![CustomFanCurve {
+                fan_id: 0,
+                sensor_id: 3,
+                steps: [1, 1, 1, 1, 2, 4, 6, 7, 8, 10],
+            }],
+            auto_smart_fan_mode: true,
+        };
+        assert_eq!(
+            report_invalid_curves(&config, std::path::Path::new("/tmp/fancontrol.json")),
+            0
+        );
     }
 
     #[test]

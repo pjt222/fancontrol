@@ -179,6 +179,8 @@ The three floors sit on the highest temperature bands and match LenovoLegionTool
 
 > **Breaking change, 2026-08-12.** The step 7 floor is new. `set-curve` invocations with step 7 at 0 were accepted before that date and now fail with `platform error: step 7 (approaching high temp) must be >= 1 for safety, got 0`. See [CHANGELOG.md](CHANGELOG.md).
 
+**Saved curves are never rewritten on disk.** If a curve in `fancontrol.json` falls outside the limits above — because it predates them, or was hand-edited — it is adjusted in memory before being applied, and the adjustment is reported once per session along with the path to the file. The file itself is left alone until you save deliberately (`s` in the TUI). The adjustment therefore recurs on every launch until you fix or re-save the curve, which is the intended trade: sanitizing raises values to restore ordering, so the repair can be drastic, and overwriting a file you wrote is not something the program should do unasked.
+
 **Steps 0–6 may be 0**, and what that does is not yet established. A step value of 0 could mean the fans stop, or it could mean the lowest entry in the hardware's speed table (~1600 RPM on the test machine). The measurements so far do not decide between those readings, and this project asserts neither — see [#18](https://github.com/pjt222/fancontrol/issues/18). Do not assume a zeroed low band stops the fans.
 
 ### Interactive TUI dashboard
