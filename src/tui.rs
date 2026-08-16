@@ -15,7 +15,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::*;
 
 use crate::config;
-use crate::fan::{CustomFanCurve, Fan, FanCurve, MAX_STEP_VALUE};
+use crate::fan::{CustomFanCurve, Fan, FanCurve, MAX_STEP_VALUE, MINIMUM_STEPS};
 use crate::platform::create_controller;
 
 // ---------------------------------------------------------------------------
@@ -382,10 +382,10 @@ fn enforce_non_decreasing(steps: &mut [u8; 10], idx: usize) {
 
 /// Enforce safety minimums for high-temperature steps.
 ///
-/// Floors match LenovoLegionToolkit's GodMode V1 table
-/// `[0,0,0,0,0,0,0,1,3,5]` — steps 0–6 have a floor of zero, matching V1, while
-/// steps 7, 8 and 9 carry floors of 1, 3 and 5. Whether a step of 0 actually
-/// stops the fans is unsettled; see `validate_custom_curve` and issue #18.
+/// Floors are read from [`MINIMUM_STEPS`], the same constant the validator
+/// checks against, so the rule that repairs a curve cannot drift from the rule
+/// that rejects one. Whether a step of 0 actually stops the fans is unsettled;
+/// see [`validate_custom_curve`] and issue #18.
 ///
 /// Output is guaranteed to satisfy `validate_custom_curve`, which needs three
 /// things this function supplies in order:
@@ -395,7 +395,7 @@ fn enforce_non_decreasing(steps: &mut [u8; 10], idx: usize) {
 ///    so a hand-edited `fancontrol.json` can carry 11–255. Clamping first also
 ///    stops the sweep in step 3 from propagating one bad value across the whole
 ///    curve.
-/// 2. **Floors** on steps 7, 8 and 9.
+/// 2. **Floors**, applied element-wise from [`MINIMUM_STEPS`].
 /// 3. **Non-decreasing**, restored by raising steps only, never lowering them.
 ///    That direction matters: pulling a step up to its predecessor can only
 ///    increase cooling, whereas lowering a predecessor to meet a step would
@@ -410,14 +410,11 @@ fn enforce_safety_minimums(steps: &mut [u8; 10]) {
             *step = MAX_STEP_VALUE;
         }
     }
-    if steps[7] < 1 {
-        steps[7] = 1;
-    }
-    if steps[8] < 3 {
-        steps[8] = 3;
-    }
-    if steps[9] < 5 {
-        steps[9] = 5;
+    // 2. Floors, element-wise from the shared table.
+    for (step, &minimum) in steps.iter_mut().zip(MINIMUM_STEPS.iter()) {
+        if *step < minimum {
+            *step = minimum;
+        }
     }
     // Restore the non-decreasing invariant by raising only. Subsumes the old
     // step-8-into-step-9 propagation.
@@ -1487,7 +1484,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::lenovo::validate_custom_curve;
+    use crate::fan::validate_custom_curve;
 
     // -- enforce_safety_minimums -------------------------------------------
 
