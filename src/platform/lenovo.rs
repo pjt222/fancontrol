@@ -61,13 +61,31 @@ fn parse_fan_id(fan_id: &str) -> Result<u32, FanControlError> {
 }
 
 /// Map PWM (0-255) to RPM using the given range.
+///
+/// A degenerate range (`max_rpm <= min_rpm`) yields `min_rpm` for every input
+/// rather than panicking: `max_rpm - min_rpm` is u32 subtraction, and an
+/// inverted range reaches this from a `TABLE|` line whose speed fields parse
+/// unevenly — field 4 valid, field 5 not, giving `min > max`. There is no
+/// proportional answer over an empty range, so the conservative end is the
+/// honest one.
 fn pwm_to_rpm(min_rpm: u32, max_rpm: u32, pwm: u8) -> u32 {
+    if max_rpm <= min_rpm {
+        return min_rpm;
+    }
     let ratio = pwm as f64 / 255.0;
     min_rpm + (ratio * (max_rpm - min_rpm) as f64) as u32
 }
 
 /// Map RPM back to approximate PWM (0-255) using the given range.
+///
+/// Degenerate ranges are handled as in [`pwm_to_rpm`]. The `rpm <= min_rpm`
+/// guard already returns before the subtraction when the range is inverted,
+/// but the check is explicit so the function does not depend on that ordering
+/// holding after a later edit.
 fn rpm_to_pwm(min_rpm: u32, max_rpm: u32, rpm: u32) -> u8 {
+    if max_rpm <= min_rpm {
+        return 0;
+    }
     if rpm <= min_rpm {
         return 0;
     }
@@ -950,6 +968,35 @@ mod tests {
             parse_table_line(line).expect("should parse").firmware_range,
             None
         );
+    }
+
+    #[test]
+    fn conversions_survive_an_inverted_range() {
+        // A TABLE| line whose speed fields parse unevenly -- field 4 valid,
+        // field 5 not -- produces min=4800, max=0. Before the guard this
+        // panicked with "attempt to subtract with overflow" at the u32
+        // subtraction in pwm_to_rpm, reached through build_fan_ranges.
+        let line = "TABLE|0|3|1|4800|notanumber|58|100|1600,4800|58,100||";
+        let entry = parse_table_line(line).expect("should parse");
+        assert_eq!(entry.table_span.min_rpm, 4800);
+        assert_eq!(entry.table_span.max_rpm, 0);
+
+        let ranges = build_fan_ranges(&[entry]);
+        let range = ranges.get(&0).expect("fan 0 present");
+
+        assert_eq!(pwm_to_rpm(range.min_rpm, range.max_rpm, 128), 4800);
+        assert_eq!(pwm_to_rpm(range.min_rpm, range.max_rpm, 255), 4800);
+        assert_eq!(rpm_to_pwm(range.min_rpm, range.max_rpm, 2000), 0);
+    }
+
+    #[test]
+    fn conversions_survive_a_zero_width_range() {
+        // Both speed fields unparseable gives min == max == 0, the shape an
+        // empty FanTable_Data would produce via Measure-Object.
+        assert_eq!(pwm_to_rpm(0, 0, 200), 0);
+        assert_eq!(rpm_to_pwm(0, 0, 2000), 0);
+        assert_eq!(pwm_to_rpm(1600, 1600, 200), 1600);
+        assert_eq!(rpm_to_pwm(1600, 1600, 2000), 0);
     }
 
     #[test]
