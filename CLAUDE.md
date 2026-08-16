@@ -65,6 +65,26 @@ for the conventions, each of which exists because it already cost a debugging
 session — ASCII-only for PowerShell 5.1, named output properties rather than
 `.ReturnValue`, and so on.
 
+**Shell snippets in docs must work under bash *and* zsh.** Commands here are
+authored in a zsh session and run by CI under bash, so a zsh-only breakage
+passes every check and reaches the user. `tests/shell_portability.rs` scans the
+` ```bash `/` ```sh ` fences of every tracked `.md` (and any `.sh`) and fails
+`cargo test` on four hazards:
+
+| Write this | Not this | Why |
+|---|---|---|
+| `--proto '=https'` | `--proto =https` | zsh reads a leading `=` as a `=command` lookup and **aborts the whole command list** |
+| `--include="*.md"` | `--include=*.md` | an unmatched glob makes zsh **skip that command** while the list continues with status 0 |
+| run bare, read `$?` | `${PIPESTATUS[0]}` | empty in zsh; the array is `$pipestatus`, 1-indexed |
+| a `read` loop | `mapfile` / `readarray` | bash-only builtins |
+
+To keep a snippet that is deliberately shell-specific, put
+`<!-- portability-exempt: reason -->` on the line before the fence (or
+`# portability-exempt: reason` in a script). State the reason — the marker is
+for genuine cases, not for silencing a finding. A ` ```zsh ` fence is exempt by
+declaration. The scanner does not follow symlinks, so `.claude/agents` and
+`.claude/skills` are out of scope.
+
 **Curve step limits live in one place.** `fan::MINIMUM_STEPS` (`[0,0,0,0,0,0,0,1,3,5]`,
 LLT's GodMode V1 table) is the single definition of the per-step floors, and
 both `validate_custom_curve` (which rejects) and the TUI's
