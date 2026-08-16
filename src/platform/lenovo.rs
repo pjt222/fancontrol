@@ -18,15 +18,34 @@ use super::FanController;
 use crate::errors::FanControlError;
 use crate::fan::{CustomFanCurve, Fan, FanCurve, FanCurvePoint, MAX_STEP_VALUE};
 
-/// Fallback RPM range used when table data is unavailable.
+/// Last-resort RPM range, used only when a fan has no table entry at all.
+///
+/// These are the Legion 82RG's measured values. Every other model reaches them
+/// only if its firmware reports neither `CurrentFanMinSpeed`/`CurrentFanMaxSpeed`
+/// nor any `FanTable_Data`, which is logged when it happens.
 const DEFAULT_MIN_RPM: u32 = 1600;
 const DEFAULT_MAX_RPM: u32 = 4800;
 
-/// Per-fan RPM range learned from table data.
-#[derive(Debug, Clone)]
+/// Per-fan RPM range.
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct FanRpmRange {
     min_rpm: u32,
     max_rpm: u32,
+}
+
+/// One parsed `TABLE|` line: the curve plus both candidate RPM ranges.
+///
+/// The two ranges are kept apart because they mean different things.
+/// `table_span` is the min/max of `FanTable_Data` — how far *this curve*
+/// reaches. `firmware_range` is `CurrentFanMinSpeed`/`CurrentFanMaxSpeed` as
+/// reported by `LENOVO_FAN_TABLE_DATA` — what *the fan* can do, which is the
+/// honest input for PWM conversion. It is `None` on firmware that omits the
+/// properties.
+#[derive(Debug)]
+struct TableEntry {
+    curve: FanCurve,
+    table_span: FanRpmRange,
+    firmware_range: Option<FanRpmRange>,
 }
 
 // ---------------------------------------------------------------------------
@@ -42,13 +61,31 @@ fn parse_fan_id(fan_id: &str) -> Result<u32, FanControlError> {
 }
 
 /// Map PWM (0-255) to RPM using the given range.
+///
+/// A degenerate range (`max_rpm <= min_rpm`) yields `min_rpm` for every input
+/// rather than panicking: `max_rpm - min_rpm` is u32 subtraction, and an
+/// inverted range reaches this from a `TABLE|` line whose speed fields parse
+/// unevenly — field 4 valid, field 5 not, giving `min > max`. There is no
+/// proportional answer over an empty range, so the conservative end is the
+/// honest one.
 fn pwm_to_rpm(min_rpm: u32, max_rpm: u32, pwm: u8) -> u32 {
+    if max_rpm <= min_rpm {
+        return min_rpm;
+    }
     let ratio = pwm as f64 / 255.0;
     min_rpm + (ratio * (max_rpm - min_rpm) as f64) as u32
 }
 
 /// Map RPM back to approximate PWM (0-255) using the given range.
+///
+/// Degenerate ranges are handled as in [`pwm_to_rpm`]. The `rpm <= min_rpm`
+/// guard already returns before the subtraction when the range is inverted,
+/// but the check is explicit so the function does not depend on that ordering
+/// holding after a later edit.
 fn rpm_to_pwm(min_rpm: u32, max_rpm: u32, rpm: u32) -> u8 {
+    if max_rpm <= min_rpm {
+        return 0;
+    }
     if rpm <= min_rpm {
         return 0;
     }
@@ -69,10 +106,14 @@ fn parse_fullspeed(output: &str) -> bool {
     false
 }
 
-/// Parse a single `TABLE|...` line into a `FanCurve` and `FanRpmRange`.
+/// Parse a single `TABLE|...` line into a `TableEntry`.
+///
+/// Fields 10 and 11 carry the firmware-reported fan range and are optional:
+/// older output and firmware without the properties simply end at field 9 or
+/// leave the fields empty, which yields `firmware_range: None`.
 ///
 /// Returns `None` if the line is malformed or too short.
-fn parse_table_line(line: &str) -> Option<(FanCurve, FanRpmRange)> {
+fn parse_table_line(line: &str) -> Option<TableEntry> {
     let parts: Vec<&str> = line.split('|').collect();
     if parts.len() < 10 {
         return None;
@@ -114,12 +155,137 @@ fn parse_table_line(line: &str) -> Option<(FanCurve, FanRpmRange)> {
         active,
     };
 
-    let range = FanRpmRange {
+    let table_span = FanRpmRange {
         min_rpm: min_speed,
         max_rpm: max_speed,
     };
 
-    Some((curve, range))
+    // Both properties must parse for the pair to be usable — half a range is
+    // worse than none, since the missing half would silently take a value from
+    // a different source.
+    let firmware_range = match (
+        parts.get(10).and_then(|v| v.trim().parse::<u32>().ok()),
+        parts.get(11).and_then(|v| v.trim().parse::<u32>().ok()),
+    ) {
+        (Some(min_rpm), Some(max_rpm)) if min_rpm < max_rpm => {
+            Some(FanRpmRange { min_rpm, max_rpm })
+        }
+        _ => None,
+    };
+
+    Some(TableEntry {
+        curve,
+        table_span,
+        firmware_range,
+    })
+}
+
+/// Widen `slot` to cover `candidate`.
+fn merge_range(slot: &mut FanRpmRange, candidate: &FanRpmRange) {
+    slot.min_rpm = slot.min_rpm.min(candidate.min_rpm);
+    slot.max_rpm = slot.max_rpm.max(candidate.max_rpm);
+}
+
+/// Aggregate per-fan RPM ranges from parsed table entries.
+///
+/// The two sources are tiered, never blended: if any entry for a fan carries a
+/// firmware-reported range, only firmware ranges are merged for that fan, and a
+/// table span may not widen it.
+///
+/// The reason is provenance, not a known failure. `CurrentFanMinSpeed` and
+/// `CurrentFanMaxSpeed` are the firmware stating what the fan can do. A table
+/// span is an inference from curve data about what one curve happens to reach,
+/// and on a model whose curve does not span the fan's full range the two
+/// legitimately differ — which is the whole point of reading the firmware
+/// values. Merging them would yield a range that is neither source's claim.
+///
+/// Fans with no firmware range fall back to the span of their own table data,
+/// which is still live and model-specific. `DEFAULT_MIN_RPM`/`DEFAULT_MAX_RPM`
+/// are reached only by a fan with no table entry at all, handled by the caller.
+fn build_fan_ranges(entries: &[TableEntry]) -> HashMap<u32, FanRpmRange> {
+    let mut firmware: HashMap<u32, FanRpmRange> = HashMap::new();
+    let mut spans: HashMap<u32, FanRpmRange> = HashMap::new();
+
+    for entry in entries {
+        let fan_id = entry.curve.fan_id;
+
+        if let Some(range) = &entry.firmware_range {
+            firmware
+                .entry(fan_id)
+                .and_modify(|slot| merge_range(slot, range))
+                .or_insert_with(|| range.clone());
+        }
+
+        spans
+            .entry(fan_id)
+            .and_modify(|slot| merge_range(slot, &entry.table_span))
+            .or_insert_with(|| entry.table_span.clone());
+    }
+
+    for (fan_id, range) in &firmware {
+        debug!(
+            "fan{fan_id}: RPM range {}-{} from CurrentFanMin/MaxSpeed",
+            range.min_rpm, range.max_rpm
+        );
+    }
+
+    let mut ranges = firmware;
+    for (fan_id, span) in spans {
+        if let std::collections::hash_map::Entry::Vacant(slot) = ranges.entry(fan_id) {
+            debug!(
+                "fan{fan_id}: firmware reports no CurrentFanMin/MaxSpeed, \
+                 falling back to table span {}-{} RPM",
+                span.min_rpm, span.max_rpm
+            );
+            slot.insert(span);
+        }
+    }
+
+    ranges
+}
+
+/// Parse every `TABLE|` line of discover output into per-fan curves and ranges.
+///
+/// Shared by `discover()` and its tests so the aggregation is exercised as
+/// written rather than as re-implemented.
+fn parse_tables(output: &str) -> (HashMap<u32, Vec<FanCurve>>, HashMap<u32, FanRpmRange>) {
+    let mut entries: Vec<TableEntry> = Vec::new();
+
+    for line in output.lines() {
+        if !line.starts_with("TABLE|") {
+            continue;
+        }
+        let Some(entry) = parse_table_line(line) else {
+            warn!("TABLE line too short: {line}");
+            continue;
+        };
+
+        debug!(
+            "TABLE: fan={} sensor={} active={} speed={}-{} temp={}-{} points={} firmware_range={:?}",
+            entry.curve.fan_id,
+            entry.curve.sensor_id,
+            entry.curve.active,
+            entry.curve.min_speed,
+            entry.curve.max_speed,
+            entry.curve.min_temp,
+            entry.curve.max_temp,
+            entry.curve.points.len(),
+            entry.firmware_range,
+        );
+        entries.push(entry);
+    }
+
+    let ranges = build_fan_ranges(&entries);
+
+    let mut curves_by_fan: HashMap<u32, Vec<FanCurve>> = HashMap::new();
+    for entry in entries {
+        curves_by_fan
+            .entry(entry.curve.fan_id)
+            .or_default()
+            .push(entry.curve);
+    }
+
+    (curves_by_fan, ranges)
 }
 
 /// Parse a single `FAN|...` line into a `Fan` struct.
@@ -288,6 +454,8 @@ fn format_ps_byte_array(bytes: &[u8]) -> String {
 pub struct LenovoFanController {
     /// Per-fan RPM ranges, populated on first discover().
     fan_ranges: std::cell::RefCell<HashMap<u32, FanRpmRange>>,
+    /// Whether the hardcoded-fallback warning has already been emitted.
+    warned_default_range: std::cell::Cell<bool>,
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -295,6 +463,7 @@ impl LenovoFanController {
     pub fn new() -> Self {
         Self {
             fan_ranges: std::cell::RefCell::new(HashMap::new()),
+            warned_default_range: std::cell::Cell::new(false),
         }
     }
 
@@ -353,7 +522,12 @@ impl FanController for LenovoFanController {
         // Output format:
         //   FULLSPEED|0/1
         //   FAN|fan_id|sensor_id|speed|temp          — one per fan (best sensor)
-        //   TABLE|fan_id|sensor_id|active|min_speed|max_speed|min_temp|max_temp|speeds_csv|temps_csv
+        //   TABLE|fan_id|sensor_id|active|min_speed|max_speed|min_temp|max_temp|speeds_csv|temps_csv|fan_min|fan_max
+        //
+        // The trailing fan_min/fan_max are CurrentFanMinSpeed/CurrentFanMaxSpeed,
+        // read defensively: they are absent on some firmware and arrive empty.
+        // DefaultFanMaxSpeed is deliberately not read — it does not exist on the
+        // 82RG, so LLT's GetDefaultFanMaxSpeedAsync would fail here (see #25).
         let script =
             "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
              $tables = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_TABLE_DATA; \
@@ -377,7 +551,9 @@ impl FanController for LenovoFanController {
                $maxSpd = ($t.FanTable_Data | Measure-Object -Maximum).Maximum; \
                $minTmp = ($t.SensorTable_Data | Measure-Object -Minimum).Minimum; \
                $maxTmp = ($t.SensorTable_Data | Measure-Object -Maximum).Maximum; \
-               Write-Output \"TABLE|$fid|$sid|$active|$minSpd|$maxSpd|$minTmp|$maxTmp|$speeds|$temps\" \
+               $fanMin = ($t.Properties | Where-Object { $_.Name -eq 'CurrentFanMinSpeed' }).Value; \
+               $fanMax = ($t.Properties | Where-Object { $_.Name -eq 'CurrentFanMaxSpeed' }).Value; \
+               Write-Output \"TABLE|$fid|$sid|$active|$minSpd|$maxSpd|$minTmp|$maxTmp|$speeds|$temps|$fanMin|$fanMax\" \
              }; \
              foreach ($fid in ($best.Keys | Sort-Object)) { \
                $sid = $best[$fid]; \
@@ -392,42 +568,7 @@ impl FanController for LenovoFanController {
         debug!("full_speed_active = {full_speed_active}");
 
         // First pass: parse TABLE lines to build curves and RPM ranges.
-        let mut curves_by_fan: HashMap<u32, Vec<FanCurve>> = HashMap::new();
-        let mut rpm_ranges: HashMap<u32, FanRpmRange> = HashMap::new();
-
-        for line in output.lines() {
-            if !line.starts_with("TABLE|") {
-                continue;
-            }
-            let Some((curve, range)) = parse_table_line(line) else {
-                warn!("TABLE line too short: {line}");
-                continue;
-            };
-
-            let fan_id = curve.fan_id;
-            debug!(
-                "TABLE: fan={} sensor={} active={} speed={}-{} temp={}-{} points={}",
-                curve.fan_id,
-                curve.sensor_id,
-                curve.active,
-                curve.min_speed,
-                curve.max_speed,
-                curve.min_temp,
-                curve.max_temp,
-                curve.points.len()
-            );
-
-            curves_by_fan.entry(fan_id).or_default().push(curve);
-
-            // Update per-fan RPM range (take the widest range across curves).
-            let existing = rpm_ranges.entry(fan_id).or_insert(range.clone());
-            if range.min_rpm < existing.min_rpm {
-                existing.min_rpm = range.min_rpm;
-            }
-            if range.max_rpm > existing.max_rpm {
-                existing.max_rpm = range.max_rpm;
-            }
-        }
+        let (mut curves_by_fan, rpm_ranges) = parse_tables(&output);
 
         // Store learned RPM ranges for pwm_to_rpm/rpm_to_pwm.
         *self.fan_ranges.borrow_mut() = rpm_ranges.clone();
@@ -441,6 +582,17 @@ impl FanController for LenovoFanController {
             if let Some(fan) =
                 parse_fan_line(line, &rpm_ranges, &mut curves_by_fan, full_speed_active)
             {
+                // `min_rpm: None` means no table entry matched this fan, so its
+                // PWM conversion is running on the hardcoded 82RG constants.
+                // Warned once per process rather than per poll: `discover()` is
+                // called every 1.5s by the GUI worker.
+                if fan.min_rpm.is_none() && !self.warned_default_range.replace(true) {
+                    warn!(
+                        "{}: no fan table entry; falling back to {DEFAULT_MIN_RPM}-{DEFAULT_MAX_RPM} RPM. \
+                         PWM values will be approximate on this hardware.",
+                        fan.id
+                    );
+                }
                 fans.push(fan);
             }
         }
@@ -724,7 +876,11 @@ mod tests {
     #[test]
     fn parse_table_line_valid() {
         let line = "TABLE|0|3|1|1600|4800|58|100|1600,2100,2700,3400,4200,4800|58,63,68,73,85,100";
-        let (curve, range) = parse_table_line(line).expect("should parse");
+        let TableEntry {
+            curve,
+            table_span,
+            firmware_range,
+        } = parse_table_line(line).expect("should parse");
         assert_eq!(curve.fan_id, 0);
         assert_eq!(curve.sensor_id, 3);
         assert!(curve.active);
@@ -737,23 +893,200 @@ mod tests {
         assert_eq!(curve.points[0].fan_speed, 1600);
         assert_eq!(curve.points[5].temperature, 100);
         assert_eq!(curve.points[5].fan_speed, 4800);
-        assert_eq!(range.min_rpm, 1600);
-        assert_eq!(range.max_rpm, 4800);
+        assert_eq!(table_span.min_rpm, 1600);
+        assert_eq!(table_span.max_rpm, 4800);
+        // No trailing fields: firmware range is absent, not inferred.
+        assert_eq!(firmware_range, None);
     }
 
     #[test]
     fn parse_table_line_inactive() {
         let line = "TABLE|1|4|0|1800|4800|63|95|1800,2400,3200,4800|63,73,85,95";
-        let (curve, _) = parse_table_line(line).expect("should parse");
-        assert_eq!(curve.fan_id, 1);
-        assert!(!curve.active);
-        assert_eq!(curve.points.len(), 4);
+        let entry = parse_table_line(line).expect("should parse");
+        assert_eq!(entry.curve.fan_id, 1);
+        assert!(!entry.curve.active);
+        assert_eq!(entry.curve.points.len(), 4);
     }
 
     #[test]
     fn parse_table_line_too_short() {
         assert!(parse_table_line("TABLE|0|3|1|1600").is_none());
         assert!(parse_table_line("").is_none());
+    }
+
+    // -- firmware-reported fan range (#30) ----------------------------------
+
+    #[test]
+    fn parse_table_line_reads_firmware_range() {
+        // Measured 82RG shape: CurrentFanMinSpeed/CurrentFanMaxSpeed trailing.
+        let line = "TABLE|0|3|1|1600|4800|58|100|1600,4800|58,100|1600|4800";
+        let entry = parse_table_line(line).expect("should parse");
+        assert_eq!(
+            entry.firmware_range,
+            Some(FanRpmRange {
+                min_rpm: 1600,
+                max_rpm: 4800
+            })
+        );
+    }
+
+    #[test]
+    fn parse_table_line_firmware_range_absent() {
+        // Firmware without the properties: PowerShell interpolates $null as an
+        // empty string, so the fields are present but blank. This is the
+        // fallback path -- it must stay exercised.
+        let line = "TABLE|0|3|1|1600|4800|58|100|1600,4800|58,100||";
+        let entry = parse_table_line(line).expect("should parse");
+        assert_eq!(entry.firmware_range, None);
+        assert_eq!(entry.table_span.min_rpm, 1600);
+    }
+
+    #[test]
+    fn parse_table_line_firmware_range_partial_is_rejected() {
+        // Half a range would silently take its other half from another source.
+        let with_min = "TABLE|0|3|1|1600|4800|58|100|1600,4800|58,100|1600|";
+        let with_max = "TABLE|0|3|1|1600|4800|58|100|1600,4800|58,100||4800";
+        assert_eq!(
+            parse_table_line(with_min)
+                .expect("should parse")
+                .firmware_range,
+            None
+        );
+        assert_eq!(
+            parse_table_line(with_max)
+                .expect("should parse")
+                .firmware_range,
+            None
+        );
+    }
+
+    #[test]
+    fn parse_table_line_firmware_range_inverted_is_rejected() {
+        // min >= max would make rpm_to_pwm divide by zero or underflow.
+        let line = "TABLE|0|3|1|1600|4800|58|100|1600,4800|58,100|4800|4800";
+        assert_eq!(
+            parse_table_line(line).expect("should parse").firmware_range,
+            None
+        );
+    }
+
+    #[test]
+    fn conversions_survive_an_inverted_range() {
+        // A TABLE| line whose speed fields parse unevenly -- field 4 valid,
+        // field 5 not -- produces min=4800, max=0. Before the guard this
+        // panicked with "attempt to subtract with overflow" at the u32
+        // subtraction in pwm_to_rpm, reached through build_fan_ranges.
+        let line = "TABLE|0|3|1|4800|notanumber|58|100|1600,4800|58,100||";
+        let entry = parse_table_line(line).expect("should parse");
+        assert_eq!(entry.table_span.min_rpm, 4800);
+        assert_eq!(entry.table_span.max_rpm, 0);
+
+        let ranges = build_fan_ranges(&[entry]);
+        let range = ranges.get(&0).expect("fan 0 present");
+
+        assert_eq!(pwm_to_rpm(range.min_rpm, range.max_rpm, 128), 4800);
+        assert_eq!(pwm_to_rpm(range.min_rpm, range.max_rpm, 255), 4800);
+        assert_eq!(rpm_to_pwm(range.min_rpm, range.max_rpm, 2000), 0);
+    }
+
+    #[test]
+    fn conversions_survive_a_zero_width_range() {
+        // Both speed fields unparseable gives min == max == 0, the shape an
+        // empty FanTable_Data would produce via Measure-Object.
+        assert_eq!(pwm_to_rpm(0, 0, 200), 0);
+        assert_eq!(rpm_to_pwm(0, 0, 2000), 0);
+        assert_eq!(pwm_to_rpm(1600, 1600, 200), 1600);
+        assert_eq!(rpm_to_pwm(1600, 1600, 2000), 0);
+    }
+
+    #[test]
+    fn parse_table_line_measured_82rg() {
+        // Captured verbatim from a Legion 82RG on 2026-08-16 by running the
+        // discover script's TABLE| fragment elevated against real firmware.
+        // Pins the shape this parser is written against, so a future change to
+        // the PowerShell side that alters the line is caught here.
+        let measured = "TABLE|0|3|1|1600|4800|58|95|\
+1600,1800,2000,2200,2800,3400,3700,4200,4400,4800|58,58,58,58,67,73,80,84,86,95|1600|4800";
+        let entry = parse_table_line(measured).expect("should parse");
+
+        assert_eq!(entry.curve.fan_id, 0);
+        assert_eq!(entry.curve.sensor_id, 3);
+        assert_eq!(entry.curve.points.len(), 10);
+        assert_eq!(
+            entry.firmware_range,
+            Some(FanRpmRange {
+                min_rpm: 1600,
+                max_rpm: 4800
+            })
+        );
+    }
+
+    #[test]
+    fn build_fan_ranges_prefers_firmware_over_table_span() {
+        // A curve that does not reach the fan's floor must not lower the range
+        // the firmware itself reported. Modelled here as a span starting at 0,
+        // the widest possible disagreement between the two sources.
+        let output = "\
+TABLE|0|3|1|0|3000|58|100|0,3000|58,100|1600|4800
+TABLE|0|0|0|0|2000|58|100|0,2000|58,100|1600|4800";
+        let (_, ranges) = parse_tables(output);
+        assert_eq!(
+            ranges.get(&0),
+            Some(&FanRpmRange {
+                min_rpm: 1600,
+                max_rpm: 4800
+            })
+        );
+    }
+
+    #[test]
+    fn build_fan_ranges_mixed_provenance_ignores_spans() {
+        // One entry for fan 0 reports the properties and one does not. The
+        // span from the second must not drag the merged range outward.
+        let output = "\
+TABLE|0|3|1|1200|5400|58|100|1200,5400|58,100||
+TABLE|0|0|0|1600|4800|58|100|1600,4800|58,100|1600|4800";
+        let (_, ranges) = parse_tables(output);
+        assert_eq!(
+            ranges.get(&0),
+            Some(&FanRpmRange {
+                min_rpm: 1600,
+                max_rpm: 4800
+            })
+        );
+    }
+
+    #[test]
+    fn build_fan_ranges_falls_back_to_table_span() {
+        // No firmware properties anywhere: the widest table span wins, which is
+        // still live data and beats the hardcoded 82RG constants.
+        let output = "\
+TABLE|1|4|1|1800|4800|63|95|1800,4800|63,95||
+TABLE|1|0|0|1500|5000|63|95|1500,5000|63,95||";
+        let (_, ranges) = parse_tables(output);
+        assert_eq!(
+            ranges.get(&1),
+            Some(&FanRpmRange {
+                min_rpm: 1500,
+                max_rpm: 5000
+            })
+        );
+    }
+
+    #[test]
+    fn parse_fan_line_without_table_entry_uses_constants() {
+        // A fan with no TABLE line at all: reports no range, and PWM is derived
+        // from DEFAULT_MIN_RPM/DEFAULT_MAX_RPM. discover() warns on this path.
+        let ranges: HashMap<u32, FanRpmRange> = HashMap::new();
+        let mut curves: HashMap<u32, Vec<FanCurve>> = HashMap::new();
+        let fan =
+            parse_fan_line("FAN|0|3|1600|45", &ranges, &mut curves, false).expect("should parse");
+        assert_eq!(fan.min_rpm, None);
+        assert_eq!(fan.max_rpm, None);
+        assert_eq!(
+            fan.pwm,
+            Some(rpm_to_pwm(DEFAULT_MIN_RPM, DEFAULT_MAX_RPM, 1600))
+        );
     }
 
     // -- parse_fan_line -----------------------------------------------------
@@ -1016,37 +1349,20 @@ mod tests {
 
     #[test]
     fn parse_full_discover_output() {
+        // Shape as emitted by discover() on the 82RG, including the trailing
+        // CurrentFanMinSpeed/CurrentFanMaxSpeed fields.
         let output = "\
 FULLSPEED|0
-TABLE|0|3|1|1600|4800|58|100|1600,2100,2700,3400,4200,4800|58,63,68,73,85,100
-TABLE|0|0|0|1600|4800|58|100|1600,2100,2700,3400,4200,4800|58,63,68,73,85,100
-TABLE|1|4|1|1800|4800|63|95|1800,2400,3200,4800|63,73,85,95
+TABLE|0|3|1|1600|4800|58|100|1600,2100,2700,3400,4200,4800|58,63,68,73,85,100|1600|4800
+TABLE|0|0|0|1600|4800|58|100|1600,2100,2700,3400,4200,4800|58,63,68,73,85,100|1600|4800
+TABLE|1|4|1|1800|4800|63|95|1800,2400,3200,4800|63,73,85,95|1600|4800
 FAN|0|3|2100|45
 FAN|1|4|0|31";
 
         let full_speed = parse_fullspeed(output);
         assert!(!full_speed);
 
-        let mut curves_by_fan: HashMap<u32, Vec<FanCurve>> = HashMap::new();
-        let mut rpm_ranges: HashMap<u32, FanRpmRange> = HashMap::new();
-
-        for line in output.lines() {
-            if !line.starts_with("TABLE|") {
-                continue;
-            }
-            let Some((curve, range)) = parse_table_line(line) else {
-                continue;
-            };
-            let fan_id = curve.fan_id;
-            curves_by_fan.entry(fan_id).or_default().push(curve);
-            let existing = rpm_ranges.entry(fan_id).or_insert(range.clone());
-            if range.min_rpm < existing.min_rpm {
-                existing.min_rpm = range.min_rpm;
-            }
-            if range.max_rpm > existing.max_rpm {
-                existing.max_rpm = range.max_rpm;
-            }
-        }
+        let (mut curves_by_fan, rpm_ranges) = parse_tables(output);
 
         // Fan 0 has 2 table entries, fan 1 has 1
         assert_eq!(curves_by_fan.get(&0).unwrap().len(), 2);
@@ -1069,6 +1385,11 @@ FAN|1|4|0|31";
         assert_eq!(fans[1].id, "fan1");
         assert_eq!(fans[1].speed_rpm, 0);
         assert_eq!(fans[1].curves.len(), 1);
+
+        // Fan 1's table span starts at 1800, but the firmware reports 1600 and
+        // the firmware wins.
+        assert_eq!(fans[1].min_rpm, Some(1600));
+        assert_eq!(fans[1].max_rpm, Some(4800));
     }
 
     #[test]
