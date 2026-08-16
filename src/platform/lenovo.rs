@@ -948,6 +948,28 @@ mod tests {
     }
 
     #[test]
+    fn parse_table_line_measured_82rg() {
+        // Captured verbatim from a Legion 82RG on 2026-08-16 by running the
+        // discover script's TABLE| fragment elevated against real firmware.
+        // Pins the shape this parser is written against, so a future change to
+        // the PowerShell side that alters the line is caught here.
+        let measured = "TABLE|0|3|1|1600|4800|58|95|\
+1600,1800,2000,2200,2800,3400,3700,4200,4400,4800|58,58,58,58,67,73,80,84,86,95|1600|4800";
+        let entry = parse_table_line(measured).expect("should parse");
+
+        assert_eq!(entry.curve.fan_id, 0);
+        assert_eq!(entry.curve.sensor_id, 3);
+        assert_eq!(entry.curve.points.len(), 10);
+        assert_eq!(
+            entry.firmware_range,
+            Some(FanRpmRange {
+                min_rpm: 1600,
+                max_rpm: 4800
+            })
+        );
+    }
+
+    #[test]
     fn build_fan_ranges_prefers_firmware_over_table_span() {
         // A custom curve can rewrite FanTable_Data far below what the fan can
         // actually run at. The firmware range must not be widened by it.
