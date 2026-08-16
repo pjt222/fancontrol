@@ -41,9 +41,16 @@ pub struct Fan {
     pub pwm: Option<u8>,
     /// Whether this fan supports speed control
     pub controllable: bool,
-    /// Minimum RPM from fan table data (if available).
+    /// Minimum RPM the fan itself can run at, when the platform reports one.
+    ///
+    /// On Lenovo this is `CurrentFanMinSpeed`, falling back to the span of the
+    /// fan's curve table — which is a different quantity, so the fallback is
+    /// an approximation rather than an equivalent.
     pub min_rpm: Option<u32>,
-    /// Maximum RPM from fan table data (if available).
+    /// Maximum RPM the fan itself can run at, when the platform reports one.
+    ///
+    /// Lenovo's `CurrentFanMaxSpeed`. Note that full speed mode exceeds it:
+    /// 5400 RPM has been observed against a reported maximum of 4800.
     pub max_rpm: Option<u32>,
     /// Fan curves from EC table data (if available).
     pub curves: Vec<FanCurve>,
