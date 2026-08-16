@@ -34,7 +34,17 @@ is enough for model and BIOS reads, but not for anything under `root\WMI`.
 
 ## Conventions
 
-These exist because each one has already cost a debugging session:
+**Target: Windows PowerShell 5.1**, measured as `5.1.26100.9168` (Desktop edition,
+CLR 4.0.30319) on the test machine, 2026-08-16. That is what `powershell.exe`
+resolves to, and `powershell.exe` is what both these tools and
+`src/platform/lenovo.rs` invoke.
+
+PowerShell Core **7.6.4 is also installed** as `pwsh.exe`. It is not used, and
+checking `pwsh --version` is a good way to talk yourself into a 7.x-only feature
+that then fails under the interpreter the code actually launches. Write for 5.1
+unless you have changed the binary being invoked.
+
+These conventions exist because each one has already cost a debugging session:
 
 - **ASCII only.** Windows PowerShell 5.1 assumes ANSI for a BOM-less file, so an
   em dash or curly quote in a `.ps1` is mangled and can break parsing. Use `--`.
