@@ -163,7 +163,23 @@ fancontrol set-curve --fan-id 0 --sensor-id 3 --steps "0,0,0,1,2,4,6,7,8,10"
 fancontrol set-curve --fan-id 0 --sensor-id 3 --steps "0,0,0,1,2,4,6,7,8,10" --save
 ```
 
-Steps index into the hardware's FanSpeeds array from `LENOVO_FAN_TABLE_DATA`. Safety validation enforces non-decreasing values and minimum thresholds at high temperatures. Requires Custom SmartFanMode (auto-switched).
+Steps index into the hardware's FanSpeeds array from `LENOVO_FAN_TABLE_DATA`, one step per temperature band, lowest band first. Requires Custom SmartFanMode (auto-switched).
+
+**Step limits.** A curve is rejected outright if it breaks any of these — `set-curve` does not quietly adjust your input:
+
+| Constraint | Rule |
+|---|---|
+| Range | every step is 0–10 |
+| Order | steps are non-decreasing |
+| Step 7 floor | ≥ 1 |
+| Step 8 floor | ≥ 3 |
+| Step 9 floor | ≥ 5 |
+
+The three floors sit on the highest temperature bands and match LenovoLegionToolkit's GodMode V1 minimum table, `[0,0,0,0,0,0,0,1,3,5]`.
+
+> **Breaking change, 2026-08-12.** The step 7 floor is new. `set-curve` invocations with step 7 at 0 were accepted before that date and now fail with `platform error: step 7 (approaching high temp) must be >= 1 for safety, got 0`. See [CHANGELOG.md](CHANGELOG.md).
+
+**Steps 0–6 may be 0**, and what that does is not yet established. A step value of 0 could mean the fans stop, or it could mean the lowest entry in the hardware's speed table (~1600 RPM on the test machine). The measurements so far do not decide between those readings, and this project asserts neither — see [#18](https://github.com/pjt222/fancontrol/issues/18). Do not assume a zeroed low band stops the fans.
 
 ### Interactive TUI dashboard
 

@@ -64,8 +64,15 @@ pub enum Commands {
         #[arg(long)]
         sensor_id: u32,
 
-        /// 10 comma-separated speed step indices (0–10 scale).
-        /// Each value indexes into the hardware's FanSpeeds array.
+        /// 10 comma-separated speed step indices (0–10 scale), one per
+        /// temperature band, lowest first. Each value indexes into the
+        /// hardware's FanSpeeds array.
+        ///
+        /// Values must be non-decreasing, and the three highest bands carry
+        /// safety floors: step 7 ≥ 1, step 8 ≥ 3, step 9 ≥ 5. Steps 0–6 may
+        /// be 0. A curve violating any of these is rejected rather than
+        /// adjusted.
+        ///
         /// Example: "0,0,0,1,2,4,6,7,8,10"
         #[arg(long, value_parser = parse_steps)]
         steps: [u8; 10],
