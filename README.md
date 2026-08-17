@@ -1,6 +1,7 @@
 # fancontrol
 
 [![CI](https://github.com/pjt222/fancontrol/actions/workflows/ci.yml/badge.svg)](https://github.com/pjt222/fancontrol/actions/workflows/ci.yml)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/pjt222/fancontrol)
 
 Minimal cross-platform fan speed control — CLI, TUI dashboard, and GUI for Linux & Windows. Lenovo Legion fan curve support via WMI.
 
