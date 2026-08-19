@@ -15,7 +15,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::*;
 
 use crate::config;
-use crate::fan::{CustomFanCurve, Fan, FanCurve, MAX_STEP_VALUE, MINIMUM_STEPS};
+use crate::fan::{smart_fan_mode, CustomFanCurve, Fan, FanCurve, MAX_STEP_VALUE, MINIMUM_STEPS};
 use crate::platform::create_controller;
 
 // ---------------------------------------------------------------------------
@@ -610,9 +610,10 @@ fn run_inner() -> Result<()> {
                     CmdMsg::ClearCustomCurves => {
                         info!("TUI poller: ClearCustomCurves");
                         held_curves.clear();
-                        // Switch back to Balanced (mode 2)
-                        if let Err(e) = ctrl.set_smart_fan_mode(2) {
-                            warn!("TUI poller: set_smart_fan_mode(2) failed: {e}");
+                        // Leave Custom mode, which stops the fans once no curve
+                        // is held. See fan::smart_fan_mode::SAFE_FALLBACK.
+                        if let Err(e) = ctrl.set_smart_fan_mode(smart_fan_mode::SAFE_FALLBACK) {
+                            warn!("TUI poller: set_smart_fan_mode(SAFE_FALLBACK) failed: {e}");
                         }
                         let _ = tx.send(PollMsg::CustomCurvesCleared);
                     }
@@ -934,18 +935,13 @@ fn handle_curve_edit(app: &mut App, code: KeyCode, step_idx: usize, cmd_tx: &mps
 // ---------------------------------------------------------------------------
 
 fn smart_fan_mode_label(mode: Option<u32>) -> &'static str {
-    match mode {
-        Some(1) => "Quiet",
-        Some(2) => "Balanced",
-        Some(3) => "Performance",
-        Some(255) => "Custom",
-        Some(v) => {
-            // Log unknown values for future discovery
+    if let Some(v) = mode {
+        if crate::fan::smart_fan_mode_label(Some(v)) == "Unknown" {
+            // Log unknown values for future discovery.
             log::debug!("Unknown SmartFanMode value: {v}");
-            "Unknown"
         }
-        None => "N/A",
     }
+    crate::fan::smart_fan_mode_label(mode)
 }
 
 fn draw_ui(f: &mut Frame, app: &App) {
@@ -985,10 +981,10 @@ fn draw_title(f: &mut Frame, app: &App, area: Rect) {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(VIRIDIS_BORDER));
     let mode_color = match app.smart_fan_mode {
-        Some(255) => VIRIDIS_CUSTOM, // Custom — lime
-        Some(1) => VIRIDIS_BIOS,     // Quiet — cool blue
-        Some(3) => VIRIDIS_HOT,      // Performance — yellow
-        _ => VIRIDIS_TITLE,          // Balanced/N/A — teal
+        Some(smart_fan_mode::CUSTOM) => VIRIDIS_CUSTOM, // Custom — lime
+        Some(smart_fan_mode::QUIET) => VIRIDIS_BIOS,    // Quiet — cool blue
+        Some(smart_fan_mode::PERFORMANCE) => VIRIDIS_HOT, // Performance — yellow
+        _ => VIRIDIS_TITLE,                             // Balanced/N/A — teal
     };
     let title_text = Paragraph::new(Line::from(vec![
         Span::styled("Fan Control", Style::default().fg(VIRIDIS_TITLE).bold()),
@@ -1383,7 +1379,17 @@ fn build_info_lines(app: &App) -> Vec<Line<'static>> {
     let held_count = app.curve_editors.values().filter(|e| e.held).count();
 
     match app.smart_fan_mode {
-        Some(255) => {
+        Some(smart_fan_mode::CUSTOM) if held_count == 0 => {
+            // Custom mode with no curve is the measured fans-off state: 0 RPM
+            // sustained at 61-67 C under full load on the 82RG. The EC may still
+            // hold a curve from an earlier write, in which case the fans are
+            // fine -- but this app has not written one, so it cannot say which.
+            lines.push(Line::from(vec![Span::styled(
+                "Custom mode with NO curve held -- fans may be stopped. Apply a curve or change mode.",
+                Style::default().fg(VIRIDIS_HOT).bold(),
+            )]));
+        }
+        Some(smart_fan_mode::CUSTOM) => {
             lines.push(Line::from(vec![Span::styled(
                 format!("Custom mode active -- {} curve(s) held", held_count),
                 Style::default().fg(VIRIDIS_CUSTOM).bold(),

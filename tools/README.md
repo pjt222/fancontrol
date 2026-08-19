@@ -10,6 +10,9 @@ and built on.
 |---|---|
 | `LenovoWmi.psm1` | Shared module: logging, elevation check, BIOS parsing, root\WMI access and method invocation |
 | `Get-GodModeVersion.ps1` | Determines whether this machine takes LLT's GodMode V1 or V2 fan-curve rules, and whether the fan max-speed properties are populated (issue #25) |
+| `Invoke-FanTableLoadTest.ps1` | Holds the CPU above the lowest curve threshold and writes a curve through `fancontrol.exe`, to decide whether `Fan_Set_Table` reaches the EC (issue #10). **Writes to the EC** |
+| `Reset-LenovoFanState.ps1` | Leaves a safe curve loaded and a chosen SmartFanMode selected. Run after any session that wrote an experimental curve. **Writes to the EC** |
+| `Get-LenovoLedSurface.ps1` | Enumerates the `LENOVO_*` classes and the lighting surface, for the power-button LED indicator work. Read-only |
 
 ## Running
 
@@ -100,8 +103,29 @@ to an existing tool over copying one.
 ## Safety
 
 Anything that writes to the EC belongs behind an explicit switch and must state
-the risk in its help block. Known-dangerous or dead-end methods, documented in
-`CLAUDE.md`: `Fan_SetCurrentFanSpeed` is silently ignored by the EC,
-`Fan_Set_MaxSpeed` has no ACPI handler, and `Fan_Set_Table` is only meaningful
-with `SmartFanMode=Custom`. Custom curves are volatile and lost on reboot,
-sleep/wake, and power-mode change.
+the risk in its help block. Two tools here write: `Invoke-FanTableLoadTest.ps1`
+and `Reset-LenovoFanState.ps1`. The former shows the shape the next one should
+copy: a curve that can only ask for *more* cooling than the default, an abort
+lever on `Fan_Set_FullSpeed(1)` which overrides the curve and so does not depend
+on the mechanism under test, and restoration of the original `SmartFanMode` in a
+`finally` block so that Ctrl-C does not leave the machine in Custom mode.
+
+Measuring a curve write requires load. Below the lowest threshold in the table
+(58 C on the 82RG) every curve prescribes the same band, so a write and a no-op
+are indistinguishable -- which is what left the March 2026 probe in `scripts/`
+inconclusive. A tool that writes a curve and observes at idle has measured
+nothing, however clean its log looks.
+
+**A curve you write outlives your script.** Measured 2026-08-19: a curve written
+in one run reactivated 24 minutes later on re-entering Custom mode, having
+survived a switch to Performance and back. Restoring `SmartFanMode` in a
+`finally` therefore hides an experimental curve rather than clearing it -- the
+machine looks well-behaved in Quiet, Balanced and Performance and inherits your
+experiment the moment anything selects Custom. Finish with
+`Reset-LenovoFanState.ps1`. Retention across reboot and sleep/wake is unmeasured;
+the older claim that curves are "lost on reboot, sleep/wake, and power-mode
+change" is now known to be wrong for the power-mode case.
+
+Known-dangerous or dead-end methods, documented in `CLAUDE.md`:
+`Fan_SetCurrentFanSpeed` is silently ignored by the EC, `Fan_Set_MaxSpeed` has no
+ACPI handler, and `Fan_Set_Table` is only meaningful with `SmartFanMode=Custom`.
