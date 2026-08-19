@@ -13,6 +13,7 @@ and built on.
 | `Invoke-FanTableLoadTest.ps1` | Holds the CPU above the lowest curve threshold and writes a curve through `fancontrol.exe`, to decide whether `Fan_Set_Table` reaches the EC (issue #10). **Writes to the EC** |
 | `Reset-LenovoFanState.ps1` | Leaves a safe curve loaded and a chosen SmartFanMode selected. Run after any session that wrote an experimental curve. **Writes to the EC** |
 | `Get-LenovoLedSurface.ps1` | Enumerates the `LENOVO_*` classes and the lighting surface, for the power-button LED indicator work. Read-only |
+| `Get-LenovoLighting.ps1` | Invokes `Get_Lighting_Current_Status` per `Lighting_Id` across a SmartFanMode sweep, to decide whether the power-button LED colour is readable at all. Writes a safe curve first, so entering Custom mid-sweep is not a fans-off trap. **Writes to the EC** |
 
 ## Running
 
@@ -103,8 +104,8 @@ to an existing tool over copying one.
 ## Safety
 
 Anything that writes to the EC belongs behind an explicit switch and must state
-the risk in its help block. Two tools here write: `Invoke-FanTableLoadTest.ps1`
-and `Reset-LenovoFanState.ps1`. The former shows the shape the next one should
+the risk in its help block. Three tools here write: `Invoke-FanTableLoadTest.ps1`,
+`Reset-LenovoFanState.ps1` and `Get-LenovoLighting.ps1`. The former shows the shape the next one should
 copy: a curve that can only ask for *more* cooling than the default, an abort
 lever on `Fan_Set_FullSpeed(1)` which overrides the curve and so does not depend
 on the mechanism under test, and restoration of the original `SmartFanMode` in a
