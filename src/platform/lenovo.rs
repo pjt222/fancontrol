@@ -411,6 +411,43 @@ impl CurveTransaction {
     }
 }
 
+/// Build the single PowerShell invocation that switches to Custom mode and
+/// writes the table.
+///
+/// Extracted from its caller so the generated script can be parse-checked and
+/// asserted on without hardware. It is one long semicolon-joined string built by
+/// `format!`, where a syntax slip breaks every `set-curve` at runtime and
+/// nowhere earlier.
+fn build_curve_transaction_script(previous_mode: u32, ps_array: &str) -> String {
+    format!(
+        "$ErrorActionPreference = 'Stop'; \
+             $gz = Get-WmiObject -Namespace root/WMI -Class LENOVO_GAMEZONE_DATA; \
+             $fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
+             $prev = {previous_mode}; \
+             Write-Output \"PREVMODE|$prev\"; \
+             $committed = $false; \
+             try {{ \
+               if ($prev -ne {custom}) {{ $gz.SetSmartFanMode({custom}) }}; \
+               $now = ($gz.GetSmartFanMode()).Data; \
+               Write-Output \"MODESET|$now\"; \
+               [byte[]]$table = {ps_array}; \
+               $fm.Fan_Set_Table($table); \
+               Write-Output 'TABLEWRITE|OK'; \
+               $committed = $true \
+             }} catch {{ \
+               Write-Output 'TABLEWRITE|ERR' \
+             }} finally {{ \
+               if ((-not $committed) -and ($prev -ne {custom})) {{ \
+                 try {{ $gz.SetSmartFanMode($prev); Write-Output \"RESTORED|$prev\" }} \
+                 catch {{ Write-Output 'RESTORED|FAIL' }} \
+               }}; \
+               $f = ($gz.GetSmartFanMode()).Data; \
+               Write-Output \"FINALMODE|$f\" \
+             }}",
+        custom = SMART_FAN_MODE_CUSTOM,
+    )
+}
+
 /// Parse the tagged output of the curve-write transaction.
 ///
 /// Unknown lines are ignored rather than rejected: PowerShell writes warnings
@@ -506,13 +543,20 @@ impl<T: SmartFanModeIo> Drop for CustomModeGuard<'_, T> {
     }
 }
 
-/// Enter Custom mode, returning a guard that will restore the previous mode
-/// unless disarmed.
+/// Read the current mode and arm a guard against it, **without changing
+/// anything**.
+///
+/// Read-only by design, and that is the point. The switch into Custom mode
+/// belongs inside the write transaction, where PowerShell's `finally` can unwind
+/// it. Doing the switch here instead would reopen the window this design exists
+/// to close: the process could die between the switch and the transaction, with
+/// nothing anywhere running to restore the mode. An earlier revision of this
+/// function did exactly that.
 ///
 /// Returns `None` when the machine is *already* in Custom mode. That case needs
 /// no guard and must not get one: the fans-off state, if it exists, predates
 /// this call, and "restoring" would mean inventing a mode the user never chose.
-fn enter_custom_mode_guard<T: SmartFanModeIo>(
+fn arm_custom_mode_guard<T: SmartFanModeIo>(
     io: &T,
 ) -> Result<Option<CustomModeGuard<'_, T>>, FanControlError> {
     match io.read_mode()? {
@@ -521,8 +565,9 @@ fn enter_custom_mode_guard<T: SmartFanModeIo>(
             Ok(None)
         }
         Some(previous) => {
-            debug!("SmartFanMode is {previous}, switching to Custom ({SMART_FAN_MODE_CUSTOM})");
-            io.write_mode(SMART_FAN_MODE_CUSTOM)?;
+            debug!(
+                "SmartFanMode is {previous}; the transaction will switch to Custom ({SMART_FAN_MODE_CUSTOM})"
+            );
             Ok(Some(CustomModeGuard {
                 io,
                 restore_to: previous,
@@ -757,11 +802,13 @@ impl FanController for LenovoFanController {
     fn set_custom_curve(&self, curve: &CustomFanCurve) -> Result<(), FanControlError> {
         validate_custom_curve(curve)?;
 
-        // Read the mode first and arm the Rust-side guard against it. This is the
-        // backstop only -- the transaction below does its own restore in a
-        // PowerShell `finally`. The guard covers what that cannot: the subprocess
-        // failing to launch, dying outright, or returning output we cannot read.
-        let mut guard = enter_custom_mode_guard(self)?;
+        // Read the mode and arm the Rust-side guard. This does NOT change the
+        // mode: the switch happens inside the transaction below, so the interval
+        // during which the machine sits in Custom without a curve lies entirely
+        // within one process that has a `finally`. The guard is the backstop for
+        // what that cannot cover -- the subprocess failing to launch, dying
+        // outright, or returning output we cannot read.
+        let mut guard = arm_custom_mode_guard(self)?;
         let previous_mode = guard
             .as_ref()
             .map(|g| g.restore_to)
@@ -783,33 +830,7 @@ impl FanController for LenovoFanController {
         // Nothing here throws. A throw sets a non-zero exit code, and
         // `ps_command` discards stdout in that case, which would lose the very
         // lines describing the failure.
-        let script = format!(
-            "$ErrorActionPreference = 'Stop'; \
-             $gz = Get-WmiObject -Namespace root/WMI -Class LENOVO_GAMEZONE_DATA; \
-             $fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
-             $prev = {previous_mode}; \
-             Write-Output \"PREVMODE|$prev\"; \
-             $committed = $false; \
-             try {{ \
-               if ($prev -ne {custom}) {{ $gz.SetSmartFanMode({custom}) }}; \
-               $now = ($gz.GetSmartFanMode()).Data; \
-               Write-Output \"MODESET|$now\"; \
-               [byte[]]$table = {ps_array}; \
-               $fm.Fan_Set_Table($table); \
-               Write-Output 'TABLEWRITE|OK'; \
-               $committed = $true \
-             }} catch {{ \
-               Write-Output 'TABLEWRITE|ERR' \
-             }} finally {{ \
-               if ((-not $committed) -and ($prev -ne {custom})) {{ \
-                 try {{ $gz.SetSmartFanMode($prev); Write-Output \"RESTORED|$prev\" }} \
-                 catch {{ Write-Output 'RESTORED|FAIL' }} \
-               }}; \
-               $f = ($gz.GetSmartFanMode()).Data; \
-               Write-Output \"FINALMODE|$f\" \
-             }}",
-            custom = SMART_FAN_MODE_CUSTOM,
-        );
+        let script = build_curve_transaction_script(previous_mode, &ps_array);
 
         let output = Self::ps_command(&script)?;
         let transaction = parse_curve_transaction(&output);
@@ -1024,15 +1045,13 @@ mod tests {
         // Custom mode rather than leave the fans stopped.
         let io = FakeModeIo::in_mode(3);
         {
-            let _guard = enter_custom_mode_guard(&io)
-                .unwrap()
-                .expect("guard expected");
+            let _guard = arm_custom_mode_guard(&io).unwrap().expect("guard expected");
             // no disarm: stands in for a failed Fan_Set_Table
         }
         assert_eq!(
             io.calls(),
-            vec!["read", "write(255)", "write(3)"],
-            "a failed curve write must return the machine to mode 3"
+            vec!["read", "write(3)"],
+            "arming only reads; the sole write is the guard's own restore"
         );
     }
 
@@ -1040,15 +1059,13 @@ mod tests {
     fn a_disarmed_guard_leaves_custom_mode_in_place() {
         let io = FakeModeIo::in_mode(2);
         {
-            let mut guard = enter_custom_mode_guard(&io)
-                .unwrap()
-                .expect("guard expected");
+            let mut guard = arm_custom_mode_guard(&io).unwrap().expect("guard expected");
             guard.disarm(); // stands in for a successful write
         }
         assert_eq!(
             io.calls(),
-            vec!["read", "write(255)"],
-            "a successful write must leave Custom mode selected"
+            vec!["read"],
+            "a successful write leaves Custom selected, touching nothing on the way out"
         );
     }
 
@@ -1058,7 +1075,7 @@ mod tests {
         // selecting a mode the user never chose.
         let io = FakeModeIo::in_mode(SMART_FAN_MODE_CUSTOM);
         {
-            let guard = enter_custom_mode_guard(&io).unwrap();
+            let guard = arm_custom_mode_guard(&io).unwrap();
             assert!(guard.is_none(), "no guard when already in Custom");
         }
         assert_eq!(io.calls(), vec!["read"], "no mode write of any kind");
@@ -1069,7 +1086,7 @@ mod tests {
         // Entering Custom with no recorded mode to return to is unrecoverable:
         // neither the guard nor the user knows what to restore.
         let io = FakeModeIo::unreadable();
-        let result = enter_custom_mode_guard(&io);
+        let result = arm_custom_mode_guard(&io);
         assert!(result.is_err(), "must refuse rather than enter blind");
         assert_eq!(
             io.calls(),
@@ -1102,16 +1119,89 @@ mod tests {
     }
 
     #[test]
-    fn entering_custom_mode_propagates_a_failed_mode_write() {
-        let mut io = FakeModeIo::in_mode(3);
-        io.write_fails = true;
-        let result = enter_custom_mode_guard(&io);
-        assert!(result.is_err(), "a failed switch into Custom must surface");
-        assert_eq!(
-            io.calls(),
-            vec!["read", "write(255)"],
-            "no guard is armed when the switch itself failed, so nothing is restored"
+    fn arming_the_guard_never_changes_the_mode() {
+        // The regression this pins: an earlier revision switched into Custom
+        // here, before the transaction ran. That reopened the window the single
+        // PowerShell invocation exists to close -- process death between the
+        // switch and the transaction left the fans stopped with nothing running
+        // to restore them. Arming must read, and nothing else.
+        for entry_mode in [1u32, 2, 3] {
+            let io = FakeModeIo::in_mode(entry_mode);
+            let guard = arm_custom_mode_guard(&io).unwrap();
+            std::mem::forget(guard); // so Drop cannot add a write
+            assert_eq!(io.calls(), vec!["read"], "arming must not write");
+        }
+    }
+
+    #[test]
+    fn the_restore_target_is_never_custom() {
+        // Restoring to Custom would be a no-op that leaves the fans stopped.
+        for entry_mode in [1u32, 2, 3] {
+            let io = FakeModeIo::in_mode(entry_mode);
+            let guard = arm_custom_mode_guard(&io).unwrap().expect("guard expected");
+            assert_ne!(guard.restore_to, SMART_FAN_MODE_CUSTOM);
+            std::mem::forget(guard);
+        }
+    }
+
+    // -- generated transaction script ---------------------------------------
+
+    /// Print the script for parse-checking against a real Windows PowerShell:
+    /// `cargo test -- --ignored --nocapture emit_curve_transaction_script`
+    #[test]
+    #[ignore = "prints the script for external parse-checking"]
+    fn emit_curve_transaction_script() {
+        println!("{}", build_curve_transaction_script(3, "@(1,0,0,0,0,0)"));
+    }
+
+    #[test]
+    fn script_never_throws() {
+        // A throw sets a non-zero exit code, and ps_command discards stdout in
+        // that case -- losing the RESTORED| line in exactly the failure it
+        // exists to report.
+        assert!(!build_curve_transaction_script(3, "@(1,0)").contains("throw"));
+    }
+
+    #[test]
+    fn script_restores_in_finally_not_catch() {
+        let script = build_curve_transaction_script(3, "@(1,0)");
+        let finally_at = script.find("finally").expect("a finally block");
+        let restore_at = script.find("RESTORED|").expect("a restore");
+        assert!(
+            restore_at > finally_at,
+            "the restore must live in finally, so it runs on paths catch does not anticipate"
         );
+    }
+
+    #[test]
+    fn script_skips_the_switch_when_already_custom() {
+        // Re-entering Custom from Custom is not a transition; treating it as one
+        // would aim the restore at Custom, making it a no-op.
+        let script = build_curve_transaction_script(SMART_FAN_MODE_CUSTOM, "@(1,0)");
+        assert!(script.contains("$prev = 255;"));
+        assert!(script.contains("if ($prev -ne 255)"));
+    }
+
+    #[test]
+    fn script_emits_every_tag_the_parser_reads() {
+        // Pins the two halves together: a tag renamed on one side only would
+        // leave is_safe() silently reading None forever.
+        let script = build_curve_transaction_script(2, "@(1,0)");
+        for tag in [
+            "PREVMODE|",
+            "MODESET|",
+            "TABLEWRITE|",
+            "RESTORED|",
+            "FINALMODE|",
+        ] {
+            assert!(script.contains(tag), "script must emit {tag}");
+        }
+    }
+
+    #[test]
+    fn script_embeds_the_byte_array_verbatim() {
+        let script = build_curve_transaction_script(3, "@(1,0,0,7,7)");
+        assert!(script.contains("[byte[]]$table = @(1,0,0,7,7);"));
     }
 
     // -- curve transaction parsing -----------------------------------------

@@ -12,6 +12,37 @@ when the change landed on `main`.
 
 ### Changed
 
+- **`set-curve` now refuses to run when SmartFanMode cannot be read.** *(2026-08-19)*
+
+  Previously it logged a warning and attempted the curve write anyway. That is
+  the worst option available, because the write requires switching the machine
+  into Custom SmartFanMode — and **Custom mode with no curve loaded stops the
+  fans and keeps them stopped under load.** Measured on a Legion 82RG: 0 RPM
+  sustained across 61–67 °C with every CPU thread pinned, where the same machine
+  held 2200 RPM in Performance.
+
+  Proceeding without a readable mode enters that state with no recorded mode to
+  return to, so neither the program nor the user can undo it. It now fails with:
+
+  ```
+  platform error: cannot read SmartFanMode, so there is no mode to restore if
+  the curve write fails; refusing to enter Custom mode (Custom with no curve
+  stops the fans)
+  ```
+
+  The machine is left on its BIOS curve, which is always safe.
+
+- **A failed curve write no longer leaves the machine in Custom mode.**
+  *(2026-08-19)*
+
+  The mode switch and the table write were two separate fallible steps, so any
+  failure of the write returned an error with the fans stopped and no
+  indication. They now happen in a single PowerShell invocation whose `finally`
+  restores the previous mode, backed by a Rust-side guard that unwinds on every
+  early return and escalates to full speed if the restore itself fails.
+
+  No change to a successful `set-curve`.
+
 - **Breaking (CLI): `set-curve` now rejects a step 7 value of 0.** *(2026-08-12)*
 
   Custom curve validation gained a safety floor of 1 on step 7, alongside the
