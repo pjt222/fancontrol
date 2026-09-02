@@ -593,38 +593,72 @@ impl std::fmt::Display for RestoreOutcome {
     }
 }
 
+/// Select a mode, then confirm by reading back that the machine has left
+/// Custom. Returns the mode read back, or `None` if anything short of that
+/// positive evidence happened.
+///
+/// A write that returns success is not evidence on its own. This firmware
+/// ignores `Fan_SetCurrentFanSpeed` without error, and the transaction's own
+/// read-back check exists because `SetSmartFanMode` might do the same. A
+/// ladder that trusted the write would report "restored" with the machine
+/// still in Custom and no curve, in exactly the shape it was built to prevent.
+fn select_and_confirm<T: SmartFanModeIo>(io: &T, mode: u32) -> Option<u32> {
+    if let Err(e) = io.write_mode(mode) {
+        error!("FAILED to select SmartFanMode {mode}: {e}");
+        return None;
+    }
+    match io.read_mode() {
+        Ok(Some(now)) if now != SMART_FAN_MODE_CUSTOM => {
+            if now != mode {
+                warn!("asked for SmartFanMode {mode}, read back {now}; out of Custom, which is what matters");
+            }
+            Some(now)
+        }
+        Ok(Some(now)) => {
+            error!("SetSmartFanMode({mode}) returned success but the mode still reads {now}; not trusting it");
+            None
+        }
+        Ok(None) => {
+            error!("SetSmartFanMode({mode}) returned success but the mode could not be read back; not trusting it");
+            None
+        }
+        Err(e) => {
+            error!("SetSmartFanMode({mode}) returned success but the read-back failed: {e}; not trusting it");
+            None
+        }
+    }
+}
+
 /// Leave Custom mode by whatever works, and say what worked.
 ///
 /// One function for both the explicit path ([`CustomModeGuard::restore_now`])
 /// and the `Drop` path, so the escalation ladder cannot drift between them:
 /// the previous mode, then [`SMART_FAN_MODE_SAFE_FALLBACK`], then full speed.
+/// Each rung is confirmed by read-back, never by the write's return value.
+///
+/// Cost, accepted against #45: every call here is an unbounded subprocess, so
+/// a wedged WMI makes this ladder hang for up to five calls, on the worker
+/// thread when reached from `Drop`. The extra rung lengthens a hang that is
+/// already unbounded; it does not create one. A timeout belongs in
+/// `ps_command`, once, not per rung.
 fn restore_and_escalate<T: SmartFanModeIo>(io: &T, restore_to: u32) -> RestoreOutcome {
     warn!(
         "curve write did not complete; restoring SmartFanMode to {restore_to} so the fans are not left stopped"
     );
-    match io.write_mode(restore_to) {
-        Ok(()) => {
-            info!("SmartFanMode restored to {restore_to}");
-            return RestoreOutcome::Restored(restore_to);
-        }
-        Err(e) => error!("FAILED to restore SmartFanMode to {restore_to}: {e}"),
+    if let Some(now) = select_and_confirm(io, restore_to) {
+        info!("SmartFanMode restored to {now}");
+        return RestoreOutcome::Restored(now);
     }
 
     if restore_to != SMART_FAN_MODE_SAFE_FALLBACK {
         // Second attempt at leaving Custom, aimed at the mode that behaves at
         // any temperature. Same channel as the write that just failed, so it
-        // only helps with a transient or a mode-specific refusal -- but it is
-        // one subprocess, and leaving Custom by any route beats masking the
-        // state with noise.
-        match io.write_mode(SMART_FAN_MODE_SAFE_FALLBACK) {
-            Ok(()) => {
-                let outcome = RestoreOutcome::FellBackTo(SMART_FAN_MODE_SAFE_FALLBACK);
-                warn!("{outcome}");
-                return outcome;
-            }
-            Err(e) => {
-                error!("FAILED to select SmartFanMode {SMART_FAN_MODE_SAFE_FALLBACK} either: {e}")
-            }
+        // only helps with a transient or a mode-specific refusal -- but
+        // leaving Custom by any route beats masking the state with noise.
+        if let Some(now) = select_and_confirm(io, SMART_FAN_MODE_SAFE_FALLBACK) {
+            let outcome = RestoreOutcome::FellBackTo(now);
+            warn!("{outcome}");
+            return outcome;
         }
     }
 
@@ -1034,8 +1068,11 @@ impl FanController for LenovoFanController {
                  the table was written in the wrong mode and is not active"
             ),
             (Some(false), _) => match &transaction.table_write_error {
-                Some(message) => format!("Fan_Set_Table failed: {message}"),
-                None => "Fan_Set_Table failed".to_string(),
+                // "curve write", not "Fan_Set_Table": the read-back check
+                // throws into the same catch, and then the table method was
+                // never reached. The message says which step threw.
+                Some(message) => format!("curve write failed: {message}"),
+                None => "curve write failed".to_string(),
             },
             _ => format!("curve write reported no outcome. Raw output: {output}"),
         };
@@ -1157,7 +1194,7 @@ impl FanController for LenovoFanController {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     // -- Custom-mode guard --------------------------------------------------
     //
@@ -1167,33 +1204,41 @@ mod tests {
     // a curve behind it.
 
     /// Records every mode operation, and can be told to fail any of them.
+    ///
+    /// A successful write updates `current`, so a read-back sees it, unless
+    /// `writes_ignored` is set: then writes return `Ok` and change nothing,
+    /// which is the silent-ignore shape this firmware shows elsewhere.
     struct FakeModeIo {
-        current: Option<u32>,
+        current: Cell<Option<u32>>,
         calls: RefCell<Vec<String>>,
         write_fails: bool,
         /// Fail writes of this one mode only, so the fallback rung of the
         /// restore ladder can be reached without failing every write.
         write_fails_only_for: Option<u32>,
+        /// Writes succeed but leave the mode unchanged.
+        writes_ignored: bool,
         full_speed_fails: bool,
     }
 
     impl FakeModeIo {
         fn in_mode(mode: u32) -> Self {
             Self {
-                current: Some(mode),
+                current: Cell::new(Some(mode)),
                 calls: RefCell::new(Vec::new()),
                 write_fails: false,
                 write_fails_only_for: None,
+                writes_ignored: false,
                 full_speed_fails: false,
             }
         }
 
         fn unreadable() -> Self {
             Self {
-                current: None,
+                current: Cell::new(None),
                 calls: RefCell::new(Vec::new()),
                 write_fails: false,
                 write_fails_only_for: None,
+                writes_ignored: false,
                 full_speed_fails: false,
             }
         }
@@ -1206,13 +1251,16 @@ mod tests {
     impl SmartFanModeIo for FakeModeIo {
         fn read_mode(&self) -> Result<Option<u32>, FanControlError> {
             self.calls.borrow_mut().push("read".to_string());
-            Ok(self.current)
+            Ok(self.current.get())
         }
 
         fn write_mode(&self, mode: u32) -> Result<(), FanControlError> {
             self.calls.borrow_mut().push(format!("write({mode})"));
             if self.write_fails || self.write_fails_only_for == Some(mode) {
                 return Err(FanControlError::Platform("simulated failure".to_string()));
+            }
+            if !self.writes_ignored {
+                self.current.set(Some(mode));
             }
             Ok(())
         }
@@ -1237,7 +1285,7 @@ mod tests {
         }
         assert_eq!(
             io.calls(),
-            vec!["read", "write(3)"],
+            vec!["read", "write(3)", "read"],
             "arming only reads; the sole write is the guard's own restore"
         );
     }
@@ -1365,7 +1413,7 @@ mod tests {
         assert_eq!(outcome, RestoreOutcome::Restored(3));
         assert_eq!(
             io.calls(),
-            vec!["read", "write(3)"],
+            vec!["read", "write(3)", "read"],
             "exactly one restore: restore_now disarms, so Drop adds nothing"
         );
     }
@@ -1384,7 +1432,7 @@ mod tests {
             outcome,
             RestoreOutcome::FellBackTo(SMART_FAN_MODE_SAFE_FALLBACK)
         );
-        assert_eq!(io.calls(), vec!["write(3)", "write(2)"]);
+        assert_eq!(io.calls(), vec!["write(3)", "write(2)", "read"]);
     }
 
     #[test]
@@ -1413,6 +1461,59 @@ mod tests {
         }
         .restore_now();
         assert_eq!(outcome, RestoreOutcome::Stranded);
+    }
+
+    #[test]
+    fn a_restore_that_still_reads_custom_is_not_trusted() {
+        // Second review, 2026-09-02: the ladder took a successful write as a
+        // successful restore, the very shape the transaction's read-back check
+        // exists for. Writes here return Ok and change nothing; the machine
+        // stays in Custom. The ladder must read back, disbelieve, and escalate
+        // rather than report "restored".
+        let mut io = FakeModeIo::in_mode(SMART_FAN_MODE_CUSTOM);
+        io.writes_ignored = true;
+        let outcome = CustomModeGuard {
+            io: &io,
+            restore_to: 3,
+            armed: true,
+        }
+        .restore_now();
+        assert_eq!(outcome, RestoreOutcome::FullSpeedEngaged);
+        assert_eq!(
+            io.calls(),
+            vec!["write(3)", "read", "write(2)", "read", "full_speed"],
+            "every rung is confirmed by read-back before it counts"
+        );
+    }
+
+    #[test]
+    fn a_restore_that_cannot_be_read_back_is_not_trusted() {
+        // Absence of evidence is not evidence of safety, on this path as on
+        // the transaction's.
+        let mut io = FakeModeIo::unreadable();
+        io.writes_ignored = true;
+        let outcome = CustomModeGuard {
+            io: &io,
+            restore_to: 3,
+            armed: true,
+        }
+        .restore_now();
+        assert_eq!(outcome, RestoreOutcome::FullSpeedEngaged);
+    }
+
+    #[test]
+    fn a_restore_reports_the_mode_read_back_not_the_mode_requested() {
+        // Out of Custom is what matters; the message should still say where
+        // the machine actually is.
+        let io = FakeModeIo::in_mode(3);
+        let outcome = CustomModeGuard {
+            io: &io,
+            restore_to: 1,
+            armed: true,
+        }
+        .restore_now();
+        assert_eq!(outcome, RestoreOutcome::Restored(1));
+        assert_eq!(io.current.get(), Some(1));
     }
 
     #[test]
@@ -1491,10 +1592,16 @@ mod tests {
     #[test]
     fn script_skips_the_switch_when_already_custom() {
         // Re-entering Custom from Custom is not a transition; treating it as one
-        // would aim the restore at Custom, making it a no-op.
+        // would aim the restore at Custom, making it a no-op. The guard
+        // condition is present for every previous mode; what makes it a skip
+        // is $prev being 255, so that assertion is the one that carries weight.
         let script = build_curve_transaction_script(SMART_FAN_MODE_CUSTOM, "@(1,0)");
         assert!(script.contains("$prev = 255;"));
         assert!(script.contains("if ($prev -ne 255)"));
+        assert!(
+            build_curve_transaction_script(3, "@(1,0)").contains("$prev = 3;"),
+            "the previous mode is embedded, not hardcoded"
+        );
     }
 
     #[test]
@@ -1595,6 +1702,9 @@ mod tests {
         // The switch was silently ignored: the read-back says 3, the table
         // write did not throw. The curve is not active, so this is a failure --
         // but the machine is not in Custom either, so nothing needs restoring.
+        // The script can no longer emit this shape, since it throws on a
+        // non-Custom read-back before writing; this pins the Rust side as belt
+        // and braces should the script ever regress.
         let tx = parse_curve_transaction("PREVMODE|3\nMODESET|3\nTABLEWRITE|OK\nFINALMODE|3\n");
         assert!(
             !tx.committed(),
