@@ -13,7 +13,7 @@ and built on.
 | `Invoke-FanTableLoadTest.ps1` | Holds the CPU above the lowest curve threshold and writes a curve through `fancontrol.exe`, to decide whether `Fan_Set_Table` reaches the EC (issue #10). **Writes to the EC** |
 | `Reset-LenovoFanState.ps1` | Leaves a safe curve loaded and a chosen SmartFanMode selected. Run after any session that wrote an experimental curve. **Writes to the EC** |
 | `Get-LenovoLedSurface.ps1` | Enumerates the `LENOVO_*` classes and the lighting surface, for the power-button LED indicator work. Read-only |
-| `Get-LenovoLighting.ps1` | Invokes `Get_Lighting_Current_Status` per `Lighting_Id` across a SmartFanMode sweep. Measured 2026-09-02 (#44): `Lighting_Id 4 -> Current_State_Type` tracks the mode, 0/1/2/3 = blue/white/red/multi by the operator's report. After each switch it asks the operator what colour the button shows and logs the answer beside the firmware's state index, so one attended run yields the index-to-colour mapping (`-NoPrompt` for unattended runs). The prompt holds the selected mode until answered, so answer it or Ctrl+C; closing the window skips the mode restore. Writes a safe curve first, so entering Custom mid-sweep is not a fans-off trap. **Writes to the EC** |
+| `Get-LenovoLighting.ps1` | Invokes `Get_Lighting_Current_Status` per `Lighting_Id` across a SmartFanMode sweep. Measured 2026-09-02 (#44): `Lighting_Id 4 -> Current_State_Type` tracks the mode, 0/1/2/3 = blue/white/red/multi by the operator's report. After each switch it asks the operator what colour the button shows and logs the answer beside the firmware's state index, so one attended run yields the index-to-colour mapping (`-NoPrompt` for unattended runs). The prompt holds the selected mode until answered, so answer it. Ctrl+C is expected to run the mode restore but is unmeasured at the prompt; closing the window skips it. Writes a safe curve first, so entering Custom mid-sweep is not a fans-off trap. **Writes to the EC** |
 
 ## Running
 
@@ -105,8 +105,8 @@ to an existing tool over copying one.
 
 Anything that writes to the EC belongs behind an explicit switch and must state
 the risk in its help block. Three tools here write: `Invoke-FanTableLoadTest.ps1`,
-`Reset-LenovoFanState.ps1` and `Get-LenovoLighting.ps1`. The former shows the shape the next one should
-copy: a curve that can only ask for *more* cooling than the default, an abort
+`Reset-LenovoFanState.ps1` and `Get-LenovoLighting.ps1`. `Invoke-FanTableLoadTest.ps1` shows the shape
+the next one should copy: a curve that can only ask for *more* cooling than the default, an abort
 lever on `Fan_Set_FullSpeed(1)` which overrides the curve and so does not depend
 on the mechanism under test, and restoration of the original `SmartFanMode` in a
 `finally` block so that Ctrl-C does not leave the machine in Custom mode.
