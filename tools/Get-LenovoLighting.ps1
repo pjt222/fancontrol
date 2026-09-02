@@ -208,19 +208,33 @@ try {
         }
     }
 
-    # --- baseline lighting dump, current mode ------------------------------
+    # --- baseline lighting dump, at whatever mode the machine is in now ------
+    # Not "the starting mode": a successful set-curve leaves the machine in
+    # Custom, because the write transaction restores the previous mode only
+    # when the write did not commit. The 2026-09-02 log labelled this dump
+    # "at the starting mode" (3) and then read Lighting_Id 4 = 3, which is
+    # Custom's index; the machine was in Custom. Read the mode and say so.
+    $baselineMode = Get-Mode
+    $result['modeBeforeSweep'] = $baselineMode
     Write-ToolLog ""
-    Write-ToolLog "--- Get_Lighting_Current_Status, all ids, at the starting mode ---"
+    Write-ToolLog ("SmartFanMode before the sweep: " + $baselineMode)
+    if ((-not $SkipSafeCurve) -and ("$baselineMode" -ne "$($script:StartMode)")) {
+        Write-ToolLog "  (a successful set-curve leaves the machine in Custom; the start mode is restored at the end)"
+    }
+    Write-ToolLog ("--- Get_Lighting_Current_Status, all ids, at SmartFanMode " + $baselineMode + " ---")
     Write-ToolLog "Every property is dumped, so a firmware that names its outputs differently shows as a dump and not as a silent null."
+    $baselineState4 = $null
     foreach ($id in $LightingIds) {
         Write-ToolLog ("  Lighting_Id " + $id + ":")
         try {
             $r = $lm.Get_Lighting_Current_Status($id)
             Write-WmiProperties $r "      "
+            if ($id -eq 4) { $baselineState4 = Get-WmiPropertyOrNull -InputObject $r -Name 'Current_State_Type' }
         } catch {
             Write-ToolLog ("      ERROR: " + $_.Exception.Message)
         }
     }
+    $result['baselineStateType4'] = $baselineState4
 
     # --- the sweep ---------------------------------------------------------
     foreach ($mode in $SweepModes) {
@@ -347,6 +361,13 @@ if ($sweep.Count -gt 0) {
     # person saw, per mode, instead of 150 lines apart.
     Write-ToolLog ""
     Write-ToolLog "--- Operator observations beside the firmware state index (Lighting_Id 4, Current_State_Type) ---"
+    if ($result.Contains('modeBeforeSweep')) {
+        # The baseline is the one reading that is not part of the sweep; it is
+        # taken in whatever mode the curve write left, and belongs in the same
+        # table so that a reader does not have to reconcile it by hand.
+        $baselineState = if ($null -eq $result['baselineStateType4']) { '(no reading)' } else { [string]$result['baselineStateType4'] }
+        Write-ToolLog ("  before the sweep (mode " + $result['modeBeforeSweep'] + "): state " + $baselineState + " -> (not asked)")
+    }
     foreach ($row in $sweep) {
         $seen = if ($null -eq $row.ledSeen) { '(not asked)' }
                 elseif ($row.ledSeen.Length -eq 0) { '(not observed)' }
