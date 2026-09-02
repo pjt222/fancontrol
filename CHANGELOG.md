@@ -12,6 +12,58 @@ when the change landed on `main`.
 
 ### Changed
 
+- **`set-curve` now refuses to run when SmartFanMode cannot be read.** *(2026-08-19)*
+
+  Previously it logged a warning and attempted the curve write anyway. That is
+  the worst option available, because the write requires switching the machine
+  into Custom SmartFanMode — and **Custom mode with no curve loaded stops the
+  fans and keeps them stopped under load.** Measured on a Legion 82RG: 0 RPM
+  sustained across 61–67 °C with every CPU thread pinned, where the same machine
+  held 2200 RPM in Performance.
+
+  Proceeding without a readable mode enters that state with no recorded mode to
+  return to, so neither the program nor the user can undo it. It now fails with:
+
+  ```
+  platform error: cannot read SmartFanMode, so there is no mode to restore if
+  the curve write fails; refusing to enter Custom mode (Custom with no curve
+  stops the fans)
+  ```
+
+  The machine is left on its BIOS curve, which is always safe.
+
+- **A failed curve write no longer leaves the machine in Custom mode, when
+  fancontrol performed the switch.** *(2026-08-19; limits stated 2026-09-02)*
+
+  The mode switch and the table write were two separate fallible steps, so any
+  failure of the write returned an error with the fans stopped and no
+  indication. They now happen in a single PowerShell invocation whose `finally`
+  restores the previous mode, backed by a Rust-side guard that unwinds on every
+  early return. If the previous mode cannot be restored the guard tries
+  Balanced, and if that fails too it engages full speed.
+
+  Three limits, stated because a review found them unstated:
+
+  - If the machine was **already in Custom** when `set-curve` ran, nothing was
+    switched and nothing is restored: the EC keeps running whatever table it
+    last received, and the error says so. This is the steady state of the
+    TUI's re-apply loop and of every second `set-curve`, and the previous
+    table is by construction whatever the user or tool last put there.
+  - **Full speed masks the fans-off state; it does not clear it.** The machine
+    is still in Custom with no curve, and `Fan_Set_FullSpeed(0)` (`set 0`, the
+    TUI toggle) would stop the fans. The log and the error tell you to select
+    another power mode (Fn+Q, or a successful `set-curve`) *before* disabling
+    full speed.
+  - The error message reports the machine's state *after* the restore has run,
+    not the state the transaction saw before it.
+
+  The transaction also verifies that the mode read back as Custom before
+  writing the table. A silently ignored mode switch would otherwise write the
+  table in the wrong mode and report success; this firmware already ignores
+  `Fan_SetCurrentFanSpeed` without error, so that shape is real.
+
+  No change to a successful `set-curve`.
+
 - **Breaking (CLI): `set-curve` now rejects a step 7 value of 0.** *(2026-08-12)*
 
   Custom curve validation gained a safety floor of 1 on step 7, alongside the
@@ -61,7 +113,10 @@ when the change landed on `main`.
 - Custom fan curve support for Lenovo Legion via `Fan_Set_Table`, with config
   persistence to `fancontrol.json`.
 - TUI dashboard (ratatui) with an interactive curve editor.
-- GUI (egui/eframe) with per-fan sliders and SmartFanMode display.
+- GUI (egui/eframe) with per-fan sliders and EC fan-curve display. *(Corrected
+  2026-09-02: this line claimed a SmartFanMode display; `src/gui.rs` has none.
+  The mode display and curve editor exist only on the unmerged
+  `phase-4-5-config-gui-curves` branch. #44 tracks the mode display.)*
 - `tools/` for reusable Windows tooling, built on `tools/LenovoWmi.psm1`.
 
 ### Fixed

@@ -247,9 +247,10 @@ fn cmd_set_curve(
         println!("Saved to {}", config::config_path().display());
     } else {
         println!();
-        println!("Note: Custom curves require SmartFanMode=Custom and are volatile");
-        println!("      (lost on reboot, sleep, or power mode change).");
-        println!("      Use --save to persist to config file.");
+        println!("Note: the curve is written to the EC, which is now in Custom SmartFanMode.");
+        println!("      The EC retains the last written curve across power-mode switches");
+        println!("      (measured 2026-08-19); reboot and sleep/wake retention are unmeasured.");
+        println!("      Use --save to persist to the config file for re-application on startup.");
     }
 
     Ok(())

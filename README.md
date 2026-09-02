@@ -39,7 +39,7 @@ fancontrol list --json             # Machine-readable JSON output
 
 # Custom fan curve with config persistence (Lenovo)
 fancontrol set-curve --fan-id 0 --sensor-id 3 \
-  --steps "0,0,0,1,2,4,6,7,8,10" --save
+  --steps "1,1,1,1,2,4,6,7,8,10" --save
 ```
 
 ## Features
@@ -47,7 +47,7 @@ fancontrol set-curve --fan-id 0 --sensor-id 3 \
 - **CLI** with subcommands: `list`, `get`, `set`, `monitor`, `table`, `set-curve`, `tui`, `gui`
 - **JSON output** (`--json`) for `list`, `get`, and `table` commands
 - **TUI dashboard** (ratatui) with viridis color scheme, real-time fan/temp display, interactive curve editor, and keyboard-driven controls
-- **GUI** (egui/eframe) with per-fan sliders, curve editor, SmartFanMode display, and real-time polling
+- **GUI** (egui/eframe) with per-fan sliders, EC fan-curve display, and real-time polling. No curve editor or SmartFanMode display yet; those exist only on the unmerged `phase-4-5-config-gui-curves` branch, and #44 tracks the mode display
 - **Config persistence** — save custom curves to `fancontrol.json` with `--save`; auto-reapplied on startup
 - **Custom fan curves** for Lenovo Legion via `Fan_Set_Table` with safety validation
 - **Linux**: sysfs/hwmon backend — reads `fan*_input`, writes `pwm*`
@@ -158,10 +158,10 @@ fancontrol table --json          # JSON output
 
 ```bash
 # 10 comma-separated speed step indices (0-10 scale)
-fancontrol set-curve --fan-id 0 --sensor-id 3 --steps "0,0,0,1,2,4,6,7,8,10"
+fancontrol set-curve --fan-id 0 --sensor-id 3 --steps "1,1,1,1,2,4,6,7,8,10"
 
 # Save to config for automatic re-application on startup
-fancontrol set-curve --fan-id 0 --sensor-id 3 --steps "0,0,0,1,2,4,6,7,8,10" --save
+fancontrol set-curve --fan-id 0 --sensor-id 3 --steps "1,1,1,1,2,4,6,7,8,10" --save
 ```
 
 Steps index into the hardware's FanSpeeds array from `LENOVO_FAN_TABLE_DATA`, one step per temperature band, lowest band first. Requires Custom SmartFanMode (auto-switched).
@@ -182,7 +182,7 @@ The three floors sit on the highest temperature bands and match LenovoLegionTool
 
 **Saved curves are never rewritten on disk.** If a curve in `fancontrol.json` falls outside the limits above — because it predates them, or was hand-edited — it is adjusted in memory before being applied, and the adjustment is reported once per session along with the path to the file. The file itself is left alone until you save deliberately (`s` in the TUI). The adjustment therefore recurs on every launch until you fix or re-save the curve, which is the intended trade: sanitizing raises values to restore ordering, so the repair can be drastic, and overwriting a file you wrote is not something the program should do unasked.
 
-**Steps 0–6 may be 0**, and what that does is not yet established. A step value of 0 could mean the fans stop, or it could mean the lowest entry in the hardware's speed table (~1600 RPM on the test machine). The measurements so far do not decide between those readings, and this project asserts neither — see [#18](https://github.com/pjt222/fancontrol/issues/18). Do not assume a zeroed low band stops the fans.
+**Steps 0–6 may be 0, and 0 stops the fan.** Measured 2026-08-19 ([#18](https://github.com/pjt222/fancontrol/issues/18)): with the minimum table `[0,0,0,0,0,0,0,1,3,5]` in force, both fans held 0 RPM across 17 consecutive samples at 58–62 °C under load, and Performance mode brought 2200 RPM straight back. `CurrentFanMinSpeed = 1600` is the slowest the fan turns *while turning*, not a floor the curve produces. So a curve whose low bands are 0 runs the machine with its fans stopped up to the first non-zero band; the floors permit that on steps 0–6, and the step 7 floor of 1 is where the fan is guaranteed to turn. Choose zeros deliberately.
 
 ### Interactive TUI dashboard
 
@@ -245,8 +245,8 @@ Default log level is Warn.
 - Linux backend requires root or appropriate permissions for PWM write access
 - Windows generic `Win32_Fan` is read-only — vendor-specific WMI is needed for control
 - Lenovo WMI `Fan_Get_Table` and `Fan_Get_MaxSpeed` return empty data on some firmware
-- `Fan_Set_Table` call succeeds but behavioral effect is unverified at idle temperatures (needs load test above 58°C)
-- Custom curves are volatile at the hardware level (lost on reboot, sleep/wake, or Fn+Q power mode change) — use `--save` or the TUI `s` key to persist curves for automatic re-application on startup
+- `Fan_Set_Table` is confirmed working on the Legion 82RG (#10, load test 2026-08-19: an all-10s curve held 4800 RPM at 61–64 °C where the no-write control sat at 0 RPM), but only fan 0 / sensor 3 has been exercised, and `--fan-id` / `--sensor-id` are accepted without being encoded (#42)
+- The EC **retains** the last written curve across power-mode switches (measured 2026-08-19; the earlier "lost on power mode change" note here was wrong). Reboot and sleep/wake retention are unmeasured. A retained curve is *latent*: it runs whenever anything selects Custom mode, so leave a safe one behind after experiments (`tools/Reset-LenovoFanState.ps1`). Use `--save` or the TUI `s` key to persist curves for automatic re-application on startup
 
 ## Acknowledgments
 

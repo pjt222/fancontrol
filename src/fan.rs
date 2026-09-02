@@ -67,6 +67,60 @@ pub struct Fan {
 /// the backend is not. One definition, so the two cannot drift.
 pub const MAX_STEP_VALUE: u8 = 10;
 
+/// SmartFanMode values, defined once.
+///
+/// Lives beside [`MINIMUM_STEPS`] for the same reason: the TUI compiles on every
+/// platform while the Lenovo backend does not, and both need these. The literals
+/// were previously repeated across `tui.rs` and `lenovo.rs`, which is how a
+/// value this consequential drifts.
+///
+/// The bare number `255` means three unrelated things in this codebase — Custom
+/// mode here, full speed in `set_pwm`, and an out-of-range step sentinel in the
+/// TUI's tests — so reading it correctly depends entirely on context. Naming it
+/// removes that.
+///
+/// **Custom is 255, verified by read-back on the 82RG, 2026-08-19.**
+/// `scripts/probe-set-table.ps1` uses 3 and labels it Custom; 3 is Performance,
+/// and that probe ran on a machine already in mode 3, so it never changed the
+/// mode and never met `Fan_Set_Table`'s prerequisite. `scripts/` is frozen
+/// history — do not take the value from there.
+pub mod smart_fan_mode {
+    pub const QUIET: u32 = 1;
+    pub const BALANCED: u32 = 2;
+    pub const PERFORMANCE: u32 = 3;
+
+    /// The mode `Fan_Set_Table` requires.
+    ///
+    /// Dangerous on its own: with no curve loaded, Custom mode **stops the fans
+    /// and keeps them stopped under load** — measured at 0 RPM across 61–67 °C
+    /// with every thread pinned. Never select it without a curve write
+    /// immediately following, guarded so that a failure unwinds it.
+    pub const CUSTOM: u32 = 255;
+
+    /// Where to return when Custom mode has to be abandoned.
+    ///
+    /// Balanced rather than the BIOS default because there is no "unset" mode to
+    /// return to, and Balanced is the mode that behaves reasonably at any
+    /// temperature. Must never equal [`CUSTOM`]; a test pins that.
+    pub const SAFE_FALLBACK: u32 = BALANCED;
+}
+
+/// Human-readable name for a SmartFanMode value.
+///
+/// Returns a label for `None` and for unrecognised values rather than failing:
+/// this feeds status displays, where an unknown mode is information, not an
+/// error.
+pub fn smart_fan_mode_label(mode: Option<u32>) -> &'static str {
+    match mode {
+        Some(smart_fan_mode::QUIET) => "Quiet",
+        Some(smart_fan_mode::BALANCED) => "Balanced",
+        Some(smart_fan_mode::PERFORMANCE) => "Performance",
+        Some(smart_fan_mode::CUSTOM) => "Custom",
+        Some(_) => "Unknown",
+        None => "N/A",
+    }
+}
+
 /// Per-step minimum values — LenovoLegionToolkit's **GodMode V1** table.
 ///
 /// The floors are data, and this is the only place they are written. Both the
@@ -99,10 +153,14 @@ fn step_band_label(index: usize) -> &'static str {
 
 /// A user-defined custom fan curve to write to the EC via Fan_Set_Table.
 ///
-/// The `steps` array contains 10 speed step indices (0–10 scale) that index
-/// into the hardware's FanSpeeds array from `LENOVO_FAN_TABLE_DATA`.
-/// For example, on an 82RG with FanSpeeds = [1600,1800,...,4800]:
-///   step index 0 → 1600 RPM, step index 9 → 4800 RPM.
+/// The `steps` array contains 10 speed step values on a 0–10 scale, one per
+/// temperature band, lowest band first. **Step 0 stops the fan**; steps 1–10
+/// map onto the hardware's ten `FanTable_Data` entries from
+/// `LENOVO_FAN_TABLE_DATA`. Measured on an 82RG, 2026-08-19 (#10, #18): with
+/// `FanTable_Data = [1600,1800,...,4800]`, an all-10s curve gave 4800 RPM and a
+/// curve of [`MINIMUM_STEPS`] held both fans at 0 RPM at 58–62 °C under load.
+/// Which sensor row's thresholds select the band is not yet measured; the
+/// encoder hardcodes `FSID = 0` (#42).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub struct CustomFanCurve {
@@ -143,13 +201,14 @@ pub struct CustomFanCurve {
 ///
 /// **What the step 7 floor does and does not claim.** Both tables require ≥ 1
 /// at step 7, which is the whole justification for enforcing it — it is
-/// upstream parity under either. It is *not* known to be an off-versus-on
-/// guarantee. Whether step value 0 means "fans off" or the lowest table entry
-/// (~1600 RPM on the 82RG) is exactly the open question in issue #18, and this
-/// crate documents both readings: [`CustomFanCurve`] describes steps as direct
-/// indices where 0 → 1600 RPM, while [`MAX_STEP_VALUE`] of 10 makes an
-/// eleven-value scale over a ten-entry table, which fits 0 = off. Do not read
-/// a thermal guarantee into this floor until #18 settles it.
+/// upstream parity under either. It is also, since 2026-08-19, known to be an
+/// off-versus-on line: **step 0 stops the fan** (#18 AC-2, measured with
+/// [`MINIMUM_STEPS`] in force, both fans at 0 RPM across 17 samples at
+/// 58–62 °C under load). So a curve whose low bands are 0 really does run the
+/// machine with its fans stopped up to the first non-zero band. The floors
+/// permit that on steps 0–6; the floor of 1 on step 7 is where the fan is
+/// guaranteed to turn. That is a design decision to make deliberately, not a
+/// limit the firmware imposes.
 ///
 /// The non-decreasing rule is ours, not upstream's — LLT enforces no
 /// monotonicity at all. It is kept as a deliberate safety choice.
@@ -229,6 +288,31 @@ mod tests {
         // [1,1,1,1,1,1,1,1,3,5]; picking it up by accident would silently
         // forbid the idle-off curves V1 permits.
         assert_eq!(MINIMUM_STEPS, [0, 0, 0, 0, 0, 0, 0, 1, 3, 5]);
+    }
+
+    #[test]
+    fn safe_fallback_is_never_custom() {
+        // The entire restore path assumes it can leave Custom mode by selecting
+        // SAFE_FALLBACK. If the two were ever equal, every "restore" would be a
+        // no-op that leaves the fans stopped.
+        assert_ne!(smart_fan_mode::SAFE_FALLBACK, smart_fan_mode::CUSTOM);
+    }
+
+    #[test]
+    fn smart_fan_mode_labels() {
+        assert_eq!(smart_fan_mode_label(Some(1)), "Quiet");
+        assert_eq!(smart_fan_mode_label(Some(2)), "Balanced");
+        assert_eq!(smart_fan_mode_label(Some(3)), "Performance");
+        assert_eq!(smart_fan_mode_label(Some(255)), "Custom");
+        assert_eq!(smart_fan_mode_label(Some(7)), "Unknown");
+        assert_eq!(smart_fan_mode_label(None), "N/A");
+    }
+
+    #[test]
+    fn custom_mode_value_is_255() {
+        // Pinned: scripts/probe-set-table.ps1 uses 3 and calls it Custom.
+        // Verified by read-back on the 82RG, 2026-08-19.
+        assert_eq!(smart_fan_mode::CUSTOM, 255);
     }
 
     #[test]

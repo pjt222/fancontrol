@@ -120,9 +120,53 @@ Working on test hardware (Legion 82RG):
 - `Fan_Set_FullSpeed(bool)` — enables/disables full speed mode
 - `Fan_SetCurrentFanSpeed(fan_id, rpm)` — set manual fan speed
 
+- `Fan_Set_Table(bytes)` — **works** (measured 2026-08-19 under load, #10). The
+  step scale is a 0–10 index, not a 0–100 percentage: an all-10s curve produced
+  4800 RPM, exactly `CurrentFanMaxSpeed`.
+
 Firmware stubs (return empty data): `Fan_Get_MaxSpeed`, `Fan_Get_Table`
 
-Untested/deferred: `Fan_Set_Table`, `Fan_Set_MaxSpeed`
+Untested/deferred: `Fan_Set_MaxSpeed`
+
+**`SmartFanMode` Custom is 255.** Values: 1=Quiet, 2=Balanced, 3=Performance,
+255=Custom, confirmed by read-back. The March 2026 probe in `scripts/` used 3 and
+called it Custom; the machine was already sitting in 3, so that probe never
+changed the mode and never met `Fan_Set_Table`'s prerequisite. Do not reintroduce
+3 from that log.
+
+**Custom mode with no curve stops the fans, at any temperature.** Measured
+2026-08-19: `SetSmartFanMode(255)` without a subsequent `Fan_Set_Table` held both
+fans at 0 RPM across 61–67 °C under full load. Anything that switches into Custom
+must guarantee a curve write lands, or restore the previous mode on failure.
+`set_custom_curve` now does both: the mode switch and the table write happen in
+**one** PowerShell invocation whose `finally` restores the previous mode, and a
+Rust-side `CustomModeGuard` is the backstop for the subprocess failing to launch
+or dying. Do not split those back into two calls — the single invocation is what
+bounds the fans-off window to one process.
+
+**The EC retains the last written curve across power-mode switches.** Measured
+2026-08-19: a curve written in one run reactivated 24 minutes later on
+re-entering Custom, having survived a switch to Performance and back. Two
+consequences. First, "Custom with no curve" really means "Custom with whatever
+was last written", which may be nothing (fresh boot), stale, or an experimental
+curve from a probe — so the fans-off hazard is *latent*, sitting harmless through
+Quiet/Balanced/Performance and firing when something selects Custom. Second,
+restoring the mode on a failed write is non-destructive, because the mode change
+does not clear the stored table. Reboot and sleep/wake retention remain
+unmeasured; the "lost on reboot, sleep, or power mode change" note is now known
+to be wrong for the power-mode case only.
+
+After any session that writes an experimental curve, run
+`tools/Reset-LenovoFanState.ps1` to leave a safe curve loaded. Otherwise the
+next thing to select Custom mode inherits the experiment.
+
+**Step 0 means the fan is off — settled 2026-08-19 (#18 AC-2).** With
+`MINIMUM_STEPS` in force, fan 0 read 0 RPM across 17 consecutive in-band samples
+from 58–62 °C under sustained load, while `restore` to mode 3 brought 2200 RPM
+straight back at 63 °C. `CurrentFanMinSpeed = 1600` is the fan's minimum *while
+spinning*, not a floor the curve must produce. The earlier caution in this file
+— that the EC's own minimum would govern and step 0 might not mean off — was
+right to withhold judgement and is now resolved by measurement.
 
 Absent entirely on this firmware: `LENOVO_OTHER_METHOD.GetFeatureValue`. LLT's
 preferred capability accessor does not exist here ("property not found"), so the
@@ -152,22 +196,50 @@ firmware, so LLT's `GetDefaultFanMaxSpeedAsync` would fail here;
 `CurrentFanMaxSpeed` is the usable source and makes the stubbed
 `Fan_Get_MaxSpeed` unnecessary.
 
-Note for issue #18, stated with its counter-evidence: the table holds **10**
-entries (indices 0–9) while `MAX_STEP_VALUE` of 10 admits **11** distinct step
-values. That mismatch needs some explanation, but at least four fit and the
-measurements do not choose between them — (a) 0 = off with steps 1–10 mapping to
-entries 0–9; (b) step 10 clamped or a sentinel, firmware saturating to the top
-entry; (c) the 0–10 bound being LLT's own UI scale rather than firmware-derived,
-in which case it says nothing about the EC; (d) 0 meaning inherit rather than off.
+**Power-button LED state is readable — measured 2026-09-02 (#44).**
+`LENOVO_LIGHTING_METHOD` exists with `Get_Lighting_Current_Status` /
+`Set_Lighting_Current_Status`; `LENOVO_LIGHTING_DATA` reports 6 instances of which
+only `Lighting_Id` 0 and 4 are real — the other four carry `Lighting_Id = 255`.
+`LENOVO_SPECTRUM_METHOD` and `LENOVO_GAMEZONE_LIGHT_PROFILE_DATA` are absent.
+`Get_Lighting_Current_Status(<id>)` takes one integer and returns
+`Current_Brightness_Level` and `Current_State_Type`. Across a SmartFanMode sweep
+by `tools/Get-LenovoLighting.ps1`, exactly one field moved:
+`Lighting_Id 4 → Current_State_Type` is 0 in Quiet, 1 in Balanced, 2 in
+Performance, 3 in Custom. It is a state *index*, not a colour; the index-to-colour
+mapping (blue / white / red / all three) still rests on the eye report. Ids 0, 1,
+2, 5 read `0 / 0` and id 3 reads `0 / 1` in every mode; brightness is 0 everywhere.
 
-Two measurements point **away** from (a): `CurrentFanMinSpeed = 1600` is exactly
-`FanTable_Data[0]`, so the firmware's self-reported minimum is entry 0 and not
-zero; and `DesignMaxFanSpeedNumber = 9` is consistent with a 0–9 index range,
-i.e. direct indexing. **Treat the step-0 meaning as unresolved.** Only #18's load
-test settles it.
+**Which sensor row's thresholds index a written table is unmeasured.**
+`encode_fan_table_bytes` hardcodes `FSID = 0`, and the fan 0 / sensor 3 row
+starts `58,58,58,58,67` while the fan 0 / sensor 0 row starts `34,36,43,127`.
+Both load tests used curves constant across indices 0–3, so neither can tell. A
+curve that differs there is safe under one reading and stops the fans at every
+load temperature under the other, which is why the tools' default safe curve is
+`1,1,1,1,2,4,6,7,8,10` and not `0,0,0,1,…`. Settling it needs a curve that
+differs across those indices, a hold at 58–66 °C, the sensor temperature logged
+beside the RPM, and a dwell longer than the fan's ~30 s ramp.
 
-Do not read the V1 minimum table together with this note as licence for
-fans-fully-off across the seven lowest bands. V1 permitting a step of 0 is a
-statement about what the *validator* accepts in the lowest temperature bands;
-actual behaviour is governed by the EC's own minimum (1600 RPM) and its idle
-handling, neither of which the curve table controls.
+Issue #18, **resolved 2026-08-19 by the AC-2 load test**: reading (a) is
+correct — **step 0 means the fan is off.** The table holds 10 entries (indices
+0–9) while `MAX_STEP_VALUE` of 10 admits 11 distinct step values, and the
+resolution is that 0 is off with steps 1–10 mapping onto entries 0–9.
+
+The two measurements that previously pointed away from (a) were real but did not
+mean what they seemed to. `CurrentFanMinSpeed = 1600` equals `FanTable_Data[0]`
+because 1600 is the slowest the fan turns *while turning*, which says nothing
+about whether it may stop. `DesignMaxFanSpeedNumber = 9` is consistent with both
+readings. Neither was evidence against 0 = off; they were evidence that indexing
+starts at entry 0, which is compatible.
+
+This is what the load test buys that no amount of table reading could: 17
+consecutive samples at 58–62 °C, under load, with `MINIMUM_STEPS` in force and
+both fans at 0 RPM.
+
+~~Do not read the V1 minimum table as licence for fans-fully-off across the
+seven lowest bands.~~ **Superseded 2026-08-19.** That caution assumed the EC's
+1600 RPM minimum would govern regardless of the curve. It does not: a curve of
+`MINIMUM_STEPS` stopped both fans outright at 58–62 °C under load. V1 permitting
+a step of 0 turns out to be licence for exactly that, so a curve whose low bands
+are 0 really will run the machine with its fans stopped up to the first non-zero
+band — which is a design decision to make deliberately, not a limit the firmware
+will quietly impose for you.

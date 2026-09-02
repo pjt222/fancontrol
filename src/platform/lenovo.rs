@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::process::Command;
 
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 
 use super::FanController;
 use crate::errors::FanControlError;
@@ -361,6 +361,399 @@ fn encode_fan_table_bytes(curve: &CustomFanCurve) -> [u8; FAN_TABLE_BUFFER_SIZE]
     bytes
 }
 
+// ---------------------------------------------------------------------------
+// Custom SmartFanMode entry, guarded
+// ---------------------------------------------------------------------------
+
+/// SmartFanMode value meaning "Custom", the mode `Fan_Set_Table` requires.
+///
+/// Re-exported from [`crate::fan::smart_fan_mode`] so this module reads
+/// naturally; the definition lives there because the TUI needs it on platforms
+/// where this backend is not compiled.
+pub(crate) use crate::fan::smart_fan_mode::CUSTOM as SMART_FAN_MODE_CUSTOM;
+
+/// Second choice when the previous mode cannot be restored after a failed
+/// write: any mode other than Custom is safe, and this is the one that behaves
+/// at every temperature.
+pub(crate) use crate::fan::smart_fan_mode::SAFE_FALLBACK as SMART_FAN_MODE_SAFE_FALLBACK;
+
+/// What one curve-write transaction reported about itself.
+///
+/// The PowerShell side emits tagged lines rather than throwing, so a failure
+/// still returns its stdout. Throwing would make the exit code non-zero, and
+/// [`LenovoFanController::ps_command`] discards stdout in that case — losing the
+/// `RESTORED|` line in exactly the failure this exists to report.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct CurveTransaction {
+    /// Mode observed before anything was changed.
+    pub prev_mode: Option<u32>,
+    /// Mode read back after switching to Custom. `None` if never reported.
+    pub mode_set: Option<u32>,
+    /// `Some(true)` on a successful `Fan_Set_Table`, `Some(false)` on failure,
+    /// `None` if the script did not get that far.
+    pub table_write_ok: Option<bool>,
+    /// The exception message behind a `Some(false)`, when the script had one.
+    /// Any throw inside the `try` lands here, not only `Fan_Set_Table`'s, so
+    /// the text says which step failed.
+    pub table_write_error: Option<String>,
+    /// Mode PowerShell restored in its `finally`, if it restored one.
+    pub restored: Option<u32>,
+    /// Mode observed last of all. The authoritative statement of where the
+    /// machine was left.
+    pub final_mode: Option<u32>,
+}
+
+impl CurveTransaction {
+    /// True when the curve is in place *and active*: the write succeeded and,
+    /// if the mode was read back at all, it read back as Custom.
+    ///
+    /// The script refuses to write when the read-back is not Custom, so this
+    /// is belt and braces on the Rust side. A missing read-back does not block
+    /// a commit: absence of that line is not evidence the switch failed, and
+    /// letting it out-rank `TABLEWRITE|OK` would undo good writes on noise.
+    pub fn committed(&self) -> bool {
+        self.table_write_ok == Some(true)
+            && !matches!(self.mode_set, Some(mode) if mode != SMART_FAN_MODE_CUSTOM)
+    }
+
+    /// True when the machine is known not to be sitting in Custom mode without a
+    /// curve — either the write landed, or the mode was restored.
+    ///
+    /// Deliberately requires positive evidence. Missing or unparseable output
+    /// returns false, so the Rust-side guard stays armed and restores.
+    pub fn is_safe(&self) -> bool {
+        if self.table_write_ok == Some(true) {
+            return true;
+        }
+        match self.final_mode {
+            Some(mode) => mode != SMART_FAN_MODE_CUSTOM,
+            None => false,
+        }
+    }
+}
+
+/// Build the single PowerShell invocation that switches to Custom mode and
+/// writes the table.
+///
+/// Extracted from its caller so the generated script can be parse-checked and
+/// asserted on without hardware. It is one long semicolon-joined string built by
+/// `format!`, where a syntax slip breaks every `set-curve` at runtime and
+/// nowhere earlier.
+fn build_curve_transaction_script(previous_mode: u32, ps_array: &str) -> String {
+    format!(
+        "$ErrorActionPreference = 'Stop'; \
+             $gz = Get-WmiObject -Namespace root/WMI -Class LENOVO_GAMEZONE_DATA; \
+             $fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
+             $prev = {previous_mode}; \
+             Write-Output \"PREVMODE|$prev\"; \
+             $committed = $false; \
+             try {{ \
+               if ($prev -ne {custom}) {{ $gz.SetSmartFanMode({custom}) }}; \
+               $now = ($gz.GetSmartFanMode()).Data; \
+               Write-Output \"MODESET|$now\"; \
+               if ($now -ne {custom}) {{ throw \"SmartFanMode read back $now after selecting {custom}\" }}; \
+               [byte[]]$table = {ps_array}; \
+               $fm.Fan_Set_Table($table); \
+               Write-Output 'TABLEWRITE|OK'; \
+               $committed = $true \
+             }} catch {{ \
+               Write-Output \"TABLEWRITE|ERR|$($_.Exception.Message)\" \
+             }} finally {{ \
+               if ((-not $committed) -and ($prev -ne {custom})) {{ \
+                 try {{ $gz.SetSmartFanMode($prev); Write-Output \"RESTORED|$prev\" }} \
+                 catch {{ Write-Output 'RESTORED|FAIL' }} \
+               }}; \
+               $f = ($gz.GetSmartFanMode()).Data; \
+               Write-Output \"FINALMODE|$f\" \
+             }}",
+        custom = SMART_FAN_MODE_CUSTOM,
+    )
+}
+
+/// Parse the tagged output of the curve-write transaction.
+///
+/// Unknown lines are ignored rather than rejected: PowerShell writes warnings
+/// and progress records into the same stream, and a strict parser would fail on
+/// noise that says nothing about the outcome.
+pub(crate) fn parse_curve_transaction(stdout: &str) -> CurveTransaction {
+    let mut tx = CurveTransaction::default();
+    for line in stdout.lines() {
+        let Some((tag, value)) = line.trim().split_once('|') else {
+            continue;
+        };
+        let value = value.trim();
+        match tag.trim() {
+            "PREVMODE" => tx.prev_mode = value.parse().ok(),
+            "MODESET" => tx.mode_set = value.parse().ok(),
+            "TABLEWRITE" => {
+                let ok = value == "OK";
+                tx.table_write_ok = Some(ok);
+                if !ok {
+                    // "ERR|<message>" from the catch block; a bare "ERR" from
+                    // an older script parses to no message rather than to the
+                    // literal word.
+                    tx.table_write_error = value
+                        .strip_prefix("ERR|")
+                        .filter(|m| !m.is_empty())
+                        .map(str::to_string);
+                }
+            }
+            // RESTORED|FAIL parses to None, which correctly reads as "no mode
+            // was restored" rather than as a restore to some unknown mode.
+            "RESTORED" => tx.restored = value.parse().ok(),
+            "FINALMODE" => tx.final_mode = value.parse().ok(),
+            _ => {}
+        }
+    }
+    tx
+}
+
+/// The mode operations the Custom-mode guard needs.
+///
+/// A trait rather than direct calls so the guard is testable: the real
+/// implementation shells out to PowerShell and needs Lenovo hardware, while the
+/// behaviour worth testing — that a failed curve write cannot leave Custom mode
+/// selected — is pure control flow.
+pub(crate) trait SmartFanModeIo {
+    fn read_mode(&self) -> Result<Option<u32>, FanControlError>;
+    fn write_mode(&self, mode: u32) -> Result<(), FanControlError>;
+    /// Last resort when no mode can be selected. `Fan_Set_FullSpeed(1)`
+    /// overrides the curve and is confirmed working on this firmware. It is a
+    /// different WMI method on the *same* PowerShell channel, so it survives a
+    /// method-specific refusal but not a channel-level failure — and it masks
+    /// the fans-off state rather than clearing it: the machine stays in Custom
+    /// with no curve, and disabling full speed later would stop the fans.
+    /// Every message on this path has to say so.
+    fn emergency_full_speed(&self) -> Result<(), FanControlError>;
+}
+
+/// Restores the previous SmartFanMode on drop unless disarmed.
+///
+/// Why this is a guard and not a cleanup branch: Custom mode with no curve
+/// loaded **stops the fans and keeps them stopped under load**. Measured on the
+/// 82RG on 2026-08-19 — 0 RPM sustained across 61–67 °C with every thread
+/// pinned, where the same machine held 2200 RPM in Performance. Entering Custom
+/// mode and then failing to write a curve is therefore a thermal event, not a
+/// failed operation, and every early return between those two points has to
+/// unwind. A hand-written branch protects only the returns someone remembered.
+pub(crate) struct CustomModeGuard<'a, T: SmartFanModeIo> {
+    io: &'a T,
+    pub(crate) restore_to: u32,
+    armed: bool,
+}
+
+// The guard is only a guard because `Drop` runs on every early return and on
+// panic. `panic = "abort"` would remove the panic half silently, so refuse to
+// build that way rather than leave a comment and hope.
+#[cfg(panic = "abort")]
+compile_error!(
+    "CustomModeGuard relies on unwinding; panic = \"abort\" disables the fans-off backstop"
+);
+
+/// What became of an attempt to leave Custom mode after a failed curve write.
+///
+/// Returned by [`CustomModeGuard::restore_now`] so the caller can put the
+/// machine's *actual* final state into the error the user sees, rather than
+/// the state the transaction reported before any restore ran.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RestoreOutcome {
+    /// The previous mode is selected again.
+    Restored(u32),
+    /// The previous mode could not be selected; this one could. Out of Custom,
+    /// which is what matters, but not where the user was.
+    FellBackTo(u32),
+    /// No mode could be selected. Full speed is engaged and the machine is
+    /// still in Custom with no curve: disabling full speed would stop the fans.
+    FullSpeedEngaged,
+    /// Nothing worked. The machine is in Custom with no curve.
+    Stranded,
+}
+
+impl std::fmt::Display for RestoreOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Restored(mode) => write!(f, "SmartFanMode restored to {mode}"),
+            Self::FellBackTo(mode) => write!(
+                f,
+                "the previous SmartFanMode could not be restored; selected {mode} ({}) instead",
+                crate::fan::smart_fan_mode_label(Some(*mode))
+            ),
+            Self::FullSpeedEngaged => write!(
+                f,
+                "no SmartFanMode could be selected, so FULL SPEED is engaged as a last resort. \
+                 The machine is still in Custom mode with no curve: select another power mode \
+                 (Fn+Q, or a successful set-curve) BEFORE disabling full speed, or the fans will stop"
+            ),
+            Self::Stranded => write!(
+                f,
+                "no SmartFanMode could be selected and full speed could not be engaged. \
+                 THE FANS MAY BE STOPPED. Select another power mode now (Fn+Q)"
+            ),
+        }
+    }
+}
+
+/// Select a mode, then confirm by reading back that the machine has left
+/// Custom. Returns the mode read back, or `None` if anything short of that
+/// positive evidence happened.
+///
+/// A write that returns success is not evidence on its own. This firmware
+/// ignores `Fan_SetCurrentFanSpeed` without error, and the transaction's own
+/// read-back check exists because `SetSmartFanMode` might do the same. A
+/// ladder that trusted the write would report "restored" with the machine
+/// still in Custom and no curve, in exactly the shape it was built to prevent.
+fn select_and_confirm<T: SmartFanModeIo>(io: &T, mode: u32) -> Option<u32> {
+    if let Err(e) = io.write_mode(mode) {
+        error!("FAILED to select SmartFanMode {mode}: {e}");
+        return None;
+    }
+    match io.read_mode() {
+        Ok(Some(now)) if now != SMART_FAN_MODE_CUSTOM => {
+            if now != mode {
+                warn!("asked for SmartFanMode {mode}, read back {now}; out of Custom, which is what matters");
+            }
+            Some(now)
+        }
+        Ok(Some(now)) => {
+            error!("SetSmartFanMode({mode}) returned success but the mode still reads {now}; not trusting it");
+            None
+        }
+        Ok(None) => {
+            error!("SetSmartFanMode({mode}) returned success but the mode could not be read back; not trusting it");
+            None
+        }
+        Err(e) => {
+            error!("SetSmartFanMode({mode}) returned success but the read-back failed: {e}; not trusting it");
+            None
+        }
+    }
+}
+
+/// Leave Custom mode by whatever works, and say what worked.
+///
+/// One function for both the explicit path ([`CustomModeGuard::restore_now`])
+/// and the `Drop` path, so the escalation ladder cannot drift between them:
+/// the previous mode, then [`SMART_FAN_MODE_SAFE_FALLBACK`], then full speed.
+/// Each rung is confirmed by read-back, never by the write's return value.
+///
+/// Cost, accepted against #45: every call here is an unbounded subprocess, so
+/// a wedged WMI makes this ladder hang for up to five calls, on the worker
+/// thread when reached from `Drop`. The extra rung lengthens a hang that is
+/// already unbounded; it does not create one. A timeout belongs in
+/// `ps_command`, once, not per rung.
+fn restore_and_escalate<T: SmartFanModeIo>(io: &T, restore_to: u32) -> RestoreOutcome {
+    warn!(
+        "curve write did not complete; restoring SmartFanMode to {restore_to} so the fans are not left stopped"
+    );
+    if let Some(now) = select_and_confirm(io, restore_to) {
+        info!("SmartFanMode restored to {now}");
+        return RestoreOutcome::Restored(now);
+    }
+
+    if restore_to != SMART_FAN_MODE_SAFE_FALLBACK {
+        // Second attempt at leaving Custom, aimed at the mode that behaves at
+        // any temperature. Same channel as the write that just failed, so it
+        // only helps with a transient or a mode-specific refusal -- but
+        // leaving Custom by any route beats masking the state with noise.
+        if let Some(now) = select_and_confirm(io, SMART_FAN_MODE_SAFE_FALLBACK) {
+            let outcome = RestoreOutcome::FellBackTo(now);
+            warn!("{outcome}");
+            return outcome;
+        }
+    }
+
+    // The write and every restore have failed: Custom mode with no curve, fans
+    // off, possibly under load. Noise is the correct failure mode here. But it
+    // masks the state rather than clearing it, and the log has to say so,
+    // because Fan_Set_FullSpeed(0) is exactly what a user does to silence fans.
+    match io.emergency_full_speed() {
+        Ok(()) => {
+            let outcome = RestoreOutcome::FullSpeedEngaged;
+            error!("{outcome}");
+            outcome
+        }
+        Err(e) => {
+            let outcome = RestoreOutcome::Stranded;
+            error!("could not engage full speed: {e}. {outcome}");
+            outcome
+        }
+    }
+}
+
+impl<T: SmartFanModeIo> CustomModeGuard<'_, T> {
+    /// Give up the restore, once the curve is safely in place.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    /// Restore now, and report what happened.
+    ///
+    /// For the path where the caller is about to build an error message: the
+    /// message should describe where the machine *is*, which is only known
+    /// after the restore has run. Disarms first, so the `Drop` that follows
+    /// cannot fire the ladder a second time.
+    fn restore_now(mut self) -> RestoreOutcome {
+        self.armed = false;
+        restore_and_escalate(self.io, self.restore_to)
+    }
+}
+
+impl<T: SmartFanModeIo> Drop for CustomModeGuard<'_, T> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Early return or panic between arming and disarming. The outcome is
+        // logged inside; there is nobody left to hand it to.
+        let _ = restore_and_escalate(self.io, self.restore_to);
+    }
+}
+
+/// Read the current mode and arm a guard against it, **without changing
+/// anything**.
+///
+/// Read-only by design, and that is the point. The switch into Custom mode
+/// belongs inside the write transaction, where PowerShell's `finally` can unwind
+/// it. Doing the switch here instead would reopen the window this design exists
+/// to close: the process could die between the switch and the transaction, with
+/// nothing anywhere running to restore the mode. An earlier revision of this
+/// function did exactly that.
+///
+/// Returns `None` when the machine is *already* in Custom mode. That case needs
+/// no guard and must not get one: the fans-off state, if it exists, predates
+/// this call, and "restoring" would mean inventing a mode the user never chose.
+fn arm_custom_mode_guard<T: SmartFanModeIo>(
+    io: &T,
+) -> Result<Option<CustomModeGuard<'_, T>>, FanControlError> {
+    match io.read_mode()? {
+        Some(SMART_FAN_MODE_CUSTOM) => {
+            debug!("SmartFanMode already Custom ({SMART_FAN_MODE_CUSTOM})");
+            Ok(None)
+        }
+        Some(previous) => {
+            debug!(
+                "SmartFanMode is {previous}; the transaction will switch to Custom ({SMART_FAN_MODE_CUSTOM})"
+            );
+            Ok(Some(CustomModeGuard {
+                io,
+                restore_to: previous,
+                armed: true,
+            }))
+        }
+        None => {
+            // Previously this warned and carried on. That is the worst available
+            // option: it enters the fans-off state with no recorded mode to
+            // return to, so neither the guard nor the user can undo it. Refusing
+            // leaves the machine on its BIOS curve, which is always safe.
+            Err(FanControlError::Platform(
+                "cannot read SmartFanMode, so there is no mode to restore if the curve write \
+                 fails; refusing to enter Custom mode (Custom with no curve stops the fans)"
+                    .to_string(),
+            ))
+        }
+    }
+}
+
 /// Format a byte array as a PowerShell byte array literal: `@(1,0,0,...)`.
 fn format_ps_byte_array(bytes: &[u8]) -> String {
     let values: Vec<String> = bytes.iter().map(|b| b.to_string()).collect();
@@ -433,6 +826,24 @@ impl LenovoFanController {
             Some(range) => (range.min_rpm, range.max_rpm),
             None => (DEFAULT_MIN_RPM, DEFAULT_MAX_RPM),
         }
+    }
+}
+
+/// Bridges the guard's small trait onto the controller's real WMI calls.
+impl SmartFanModeIo for LenovoFanController {
+    fn read_mode(&self) -> Result<Option<u32>, FanControlError> {
+        FanController::get_smart_fan_mode(self)
+    }
+
+    fn write_mode(&self, mode: u32) -> Result<(), FanControlError> {
+        FanController::set_smart_fan_mode(self, mode)
+    }
+
+    fn emergency_full_speed(&self) -> Result<(), FanControlError> {
+        let script = "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
+             $fm.Fan_Set_FullSpeed(1)";
+        Self::ps_command(script)?;
+        Ok(())
     }
 }
 
@@ -557,20 +968,17 @@ impl FanController for LenovoFanController {
     fn set_custom_curve(&self, curve: &CustomFanCurve) -> Result<(), FanControlError> {
         validate_custom_curve(curve)?;
 
-        // Ensure SmartFanMode is set to Custom (255) — required for Fan_Set_Table.
-        // Mode values: 1=Quiet, 2=Balanced, 3=Performance, 255=Custom.
-        match self.get_smart_fan_mode()? {
-            Some(255) => {
-                debug!("SmartFanMode already Custom (255)");
-            }
-            Some(mode) => {
-                warn!("SmartFanMode is {mode}, switching to Custom (255) for fan curve write");
-                self.set_smart_fan_mode(255)?;
-            }
-            None => {
-                warn!("Could not read SmartFanMode, attempting Fan_Set_Table anyway");
-            }
-        }
+        // Read the mode and arm the Rust-side guard. This does NOT change the
+        // mode: the switch happens inside the transaction below, so the interval
+        // during which the machine sits in Custom without a curve lies entirely
+        // within one process that has a `finally`. The guard is the backstop for
+        // what that cannot cover -- the subprocess failing to launch, dying
+        // outright, or returning output we cannot read.
+        let mut guard = arm_custom_mode_guard(self)?;
+        let previous_mode = guard
+            .as_ref()
+            .map(|g| g.restore_to)
+            .unwrap_or(SMART_FAN_MODE_CUSTOM);
 
         let bytes = encode_fan_table_bytes(curve);
         let ps_array = format_ps_byte_array(&bytes);
@@ -579,14 +987,96 @@ impl FanController for LenovoFanController {
             curve.fan_id, curve.sensor_id, curve.steps
         );
 
-        let script = format!(
-            "$fm = Get-WmiObject -Namespace root/WMI -Class LENOVO_FAN_METHOD; \
-             [byte[]]$table = {ps_array}; \
-             $fm.Fan_Set_Table($table)"
-        );
-        Self::ps_command(&script)?;
-        info!("Fan_Set_Table called successfully");
-        Ok(())
+        // Mode switch and table write in ONE invocation, so the interval during
+        // which the machine sits in Custom mode with no curve is bounded by a
+        // single process with a `finally` clause -- rather than spanning two
+        // subprocess calls, where nothing at all runs if this process dies
+        // between them.
+        //
+        // No throw escapes the script: the one inside its `try` is caught and
+        // reported through the tags. An escaping throw would set a non-zero
+        // exit code, and `ps_command` discards stdout in that case, which would
+        // lose the very lines describing the failure.
+        let script = build_curve_transaction_script(previous_mode, &ps_array);
+
+        // If PowerShell itself fails -- no launch, or a non-zero exit because
+        // something outside the try threw -- there are no tags to read. The
+        // guard would restore on drop anyway; restoring explicitly here puts
+        // the outcome into the error, as the tagged paths below do.
+        let output = match Self::ps_command(&script) {
+            Ok(output) => output,
+            Err(e) => {
+                let aftermath = match guard.take() {
+                    Some(g) => format!("; {}", g.restore_now()),
+                    None => String::new(),
+                };
+                return Err(FanControlError::Platform(format!(
+                    "curve write transaction did not run to completion: {e}{aftermath}"
+                )));
+            }
+        };
+        let transaction = parse_curve_transaction(&output);
+        debug!("curve transaction: {transaction:?}");
+
+        // Disarm on positive evidence only. Otherwise restore *now*, through
+        // the same ladder `Drop` uses, so the error below describes where the
+        // machine ended up rather than where the transaction left it.
+        let aftermath = if transaction.is_safe() {
+            if let Some(g) = guard.as_mut() {
+                g.disarm();
+            }
+            match (transaction.restored, transaction.final_mode) {
+                (Some(restored), _) => {
+                    format!("; the transaction restored SmartFanMode to {restored}")
+                }
+                (None, Some(final_mode)) => format!("; SmartFanMode is {final_mode}"),
+                (None, None) => String::new(),
+            }
+        } else {
+            match guard.take() {
+                Some(g) => format!("; {}", g.restore_now()),
+                None => {
+                    // No guard because the machine was already in Custom before
+                    // this call. Nothing was switched, so nothing is restored:
+                    // the EC keeps running whatever table it last received,
+                    // which may be a good curve or the fans-off state, and this
+                    // code cannot tell which. Say so, rather than select a mode
+                    // the user never chose on a possibly transient failure.
+                    warn!(
+                        "curve write failed with SmartFanMode already Custom; left as found. \
+                         The EC runs the last table it received, which may stop the fans"
+                    );
+                    format!(
+                        "; SmartFanMode was already Custom ({SMART_FAN_MODE_CUSTOM}) before this \
+                         call and is left there. The EC runs the last table it received; select \
+                         another power mode if the fans are stopped"
+                    )
+                }
+            }
+        };
+
+        if transaction.committed() {
+            info!("Fan_Set_Table committed; SmartFanMode is Custom with a curve loaded");
+            return Ok(());
+        }
+
+        let reason = match (transaction.table_write_ok, transaction.mode_set) {
+            // committed() already returned for Some(true) with a Custom or
+            // missing read-back, so this arm is the wrong-mode case only.
+            (Some(true), Some(mode)) => format!(
+                "SmartFanMode read back {mode} after selecting Custom ({SMART_FAN_MODE_CUSTOM}); \
+                 the table was written in the wrong mode and is not active"
+            ),
+            (Some(false), _) => match &transaction.table_write_error {
+                // "curve write", not "Fan_Set_Table": the read-back check
+                // throws into the same catch, and then the table method was
+                // never reached. The message says which step threw.
+                Some(message) => format!("curve write failed: {message}"),
+                None => "curve write failed".to_string(),
+            },
+            _ => format!("curve write reported no outcome. Raw output: {output}"),
+        };
+        Err(FanControlError::Platform(format!("{reason}{aftermath}")))
     }
 
     fn get_smart_fan_mode(&self) -> Result<Option<u32>, FanControlError> {
@@ -704,6 +1194,561 @@ impl FanController for LenovoFanController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::{Cell, RefCell};
+
+    // -- Custom-mode guard --------------------------------------------------
+    //
+    // These cover the hazard measured on 2026-08-19: Custom mode with no curve
+    // loaded stops the fans and keeps them stopped under load. The property
+    // under test is that no failure path can leave Custom mode selected without
+    // a curve behind it.
+
+    /// Records every mode operation, and can be told to fail any of them.
+    ///
+    /// A successful write updates `current`, so a read-back sees it, unless
+    /// `writes_ignored` is set: then writes return `Ok` and change nothing,
+    /// which is the silent-ignore shape this firmware shows elsewhere.
+    struct FakeModeIo {
+        current: Cell<Option<u32>>,
+        calls: RefCell<Vec<String>>,
+        write_fails: bool,
+        /// Fail writes of this one mode only, so the fallback rung of the
+        /// restore ladder can be reached without failing every write.
+        write_fails_only_for: Option<u32>,
+        /// Writes succeed but leave the mode unchanged.
+        writes_ignored: bool,
+        full_speed_fails: bool,
+    }
+
+    impl FakeModeIo {
+        fn in_mode(mode: u32) -> Self {
+            Self {
+                current: Cell::new(Some(mode)),
+                calls: RefCell::new(Vec::new()),
+                write_fails: false,
+                write_fails_only_for: None,
+                writes_ignored: false,
+                full_speed_fails: false,
+            }
+        }
+
+        fn unreadable() -> Self {
+            Self {
+                current: Cell::new(None),
+                calls: RefCell::new(Vec::new()),
+                write_fails: false,
+                write_fails_only_for: None,
+                writes_ignored: false,
+                full_speed_fails: false,
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl SmartFanModeIo for FakeModeIo {
+        fn read_mode(&self) -> Result<Option<u32>, FanControlError> {
+            self.calls.borrow_mut().push("read".to_string());
+            Ok(self.current.get())
+        }
+
+        fn write_mode(&self, mode: u32) -> Result<(), FanControlError> {
+            self.calls.borrow_mut().push(format!("write({mode})"));
+            if self.write_fails || self.write_fails_only_for == Some(mode) {
+                return Err(FanControlError::Platform("simulated failure".to_string()));
+            }
+            if !self.writes_ignored {
+                self.current.set(Some(mode));
+            }
+            Ok(())
+        }
+
+        fn emergency_full_speed(&self) -> Result<(), FanControlError> {
+            self.calls.borrow_mut().push("full_speed".to_string());
+            if self.full_speed_fails {
+                return Err(FanControlError::Platform("simulated failure".to_string()));
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn dropping_an_armed_guard_restores_the_previous_mode() {
+        // The core hazard: the curve write fails, so the guard must unwind
+        // Custom mode rather than leave the fans stopped.
+        let io = FakeModeIo::in_mode(3);
+        {
+            let _guard = arm_custom_mode_guard(&io).unwrap().expect("guard expected");
+            // no disarm: stands in for a failed Fan_Set_Table
+        }
+        assert_eq!(
+            io.calls(),
+            vec!["read", "write(3)", "read"],
+            "arming only reads; the sole write is the guard's own restore"
+        );
+    }
+
+    #[test]
+    fn a_disarmed_guard_leaves_custom_mode_in_place() {
+        let io = FakeModeIo::in_mode(2);
+        {
+            let mut guard = arm_custom_mode_guard(&io).unwrap().expect("guard expected");
+            guard.disarm(); // stands in for a successful write
+        }
+        assert_eq!(
+            io.calls(),
+            vec!["read"],
+            "a successful write leaves Custom selected, touching nothing on the way out"
+        );
+    }
+
+    #[test]
+    fn already_in_custom_mode_yields_no_guard() {
+        // The fans-off state, if any, predates this call. Restoring would mean
+        // selecting a mode the user never chose.
+        let io = FakeModeIo::in_mode(SMART_FAN_MODE_CUSTOM);
+        {
+            let guard = arm_custom_mode_guard(&io).unwrap();
+            assert!(guard.is_none(), "no guard when already in Custom");
+        }
+        assert_eq!(io.calls(), vec!["read"], "no mode write of any kind");
+    }
+
+    #[test]
+    fn an_unreadable_mode_refuses_to_enter_custom() {
+        // Entering Custom with no recorded mode to return to is unrecoverable:
+        // neither the guard nor the user knows what to restore.
+        let io = FakeModeIo::unreadable();
+        let result = arm_custom_mode_guard(&io);
+        assert!(result.is_err(), "must refuse rather than enter blind");
+        assert_eq!(
+            io.calls(),
+            vec!["read"],
+            "the mode must not be changed when it could not be read"
+        );
+    }
+
+    #[test]
+    fn a_failed_restore_falls_back_to_full_speed() {
+        // Write failed and every restore failed, so the machine is in Custom
+        // with no curve. Full speed overrides the curve, so noise beats a
+        // stopped fan -- after one more attempt at leaving Custom by any route.
+        let mut io = FakeModeIo::in_mode(1);
+        io.write_fails = true;
+        {
+            // Arming only reads, so it would succeed here. Construct the guard
+            // directly to exercise the drop path in isolation from arming.
+            let _guard = CustomModeGuard {
+                io: &io,
+                restore_to: 1,
+                armed: true,
+            };
+        }
+        assert_eq!(
+            io.calls(),
+            vec!["write(1)", "write(2)", "full_speed"],
+            "previous mode, then SAFE_FALLBACK, then full speed"
+        );
+    }
+
+    #[test]
+    fn a_failed_restore_does_not_retry_the_same_mode() {
+        // When the previous mode already is SAFE_FALLBACK there is no second
+        // rung to try; go straight to full speed.
+        let mut io = FakeModeIo::in_mode(SMART_FAN_MODE_SAFE_FALLBACK);
+        io.write_fails = true;
+        {
+            let _guard = CustomModeGuard {
+                io: &io,
+                restore_to: SMART_FAN_MODE_SAFE_FALLBACK,
+                armed: true,
+            };
+        }
+        assert_eq!(io.calls(), vec!["write(2)", "full_speed"]);
+    }
+
+    #[test]
+    fn arming_the_guard_never_changes_the_mode() {
+        // The regression this pins: an earlier revision switched into Custom
+        // here, before the transaction ran. That reopened the window the single
+        // PowerShell invocation exists to close -- process death between the
+        // switch and the transaction left the fans stopped with nothing running
+        // to restore them. Arming must read, and nothing else.
+        for entry_mode in [1u32, 2, 3] {
+            let io = FakeModeIo::in_mode(entry_mode);
+            let guard = arm_custom_mode_guard(&io).unwrap();
+            std::mem::forget(guard); // so Drop cannot add a write
+            assert_eq!(io.calls(), vec!["read"], "arming must not write");
+        }
+    }
+
+    #[test]
+    fn the_restore_target_is_never_custom() {
+        // Restoring to Custom would be a no-op that leaves the fans stopped.
+        for entry_mode in [1u32, 2, 3] {
+            let io = FakeModeIo::in_mode(entry_mode);
+            let guard = arm_custom_mode_guard(&io).unwrap().expect("guard expected");
+            assert_ne!(guard.restore_to, SMART_FAN_MODE_CUSTOM);
+            std::mem::forget(guard);
+        }
+    }
+
+    // -- explicit restore, for the error message ----------------------------
+    //
+    // Review finding, 2026-09-02: the error the user saw was formatted before
+    // the guard dropped, so on the worst path it stated the opposite of the
+    // machine's final state. restore_now() runs the same ladder as Drop and
+    // hands back what happened, so the message can say where the machine is.
+
+    #[test]
+    fn restore_now_restores_reports_and_disarms() {
+        let io = FakeModeIo::in_mode(3);
+        let outcome = {
+            let guard = arm_custom_mode_guard(&io).unwrap().expect("guard expected");
+            guard.restore_now()
+            // guard is consumed here; its Drop runs disarmed
+        };
+        assert_eq!(outcome, RestoreOutcome::Restored(3));
+        assert_eq!(
+            io.calls(),
+            vec!["read", "write(3)", "read"],
+            "exactly one restore: restore_now disarms, so Drop adds nothing"
+        );
+    }
+
+    #[test]
+    fn restore_now_falls_back_to_safe_mode_when_the_previous_mode_is_refused() {
+        let mut io = FakeModeIo::in_mode(3);
+        io.write_fails_only_for = Some(3);
+        let outcome = CustomModeGuard {
+            io: &io,
+            restore_to: 3,
+            armed: true,
+        }
+        .restore_now();
+        assert_eq!(
+            outcome,
+            RestoreOutcome::FellBackTo(SMART_FAN_MODE_SAFE_FALLBACK)
+        );
+        assert_eq!(io.calls(), vec!["write(3)", "write(2)", "read"]);
+    }
+
+    #[test]
+    fn restore_now_reports_full_speed_when_no_mode_can_be_selected() {
+        let mut io = FakeModeIo::in_mode(1);
+        io.write_fails = true;
+        let outcome = CustomModeGuard {
+            io: &io,
+            restore_to: 1,
+            armed: true,
+        }
+        .restore_now();
+        assert_eq!(outcome, RestoreOutcome::FullSpeedEngaged);
+        assert_eq!(io.calls(), vec!["write(1)", "write(2)", "full_speed"]);
+    }
+
+    #[test]
+    fn restore_now_reports_stranded_when_nothing_works() {
+        let mut io = FakeModeIo::in_mode(3);
+        io.write_fails = true;
+        io.full_speed_fails = true;
+        let outcome = CustomModeGuard {
+            io: &io,
+            restore_to: 3,
+            armed: true,
+        }
+        .restore_now();
+        assert_eq!(outcome, RestoreOutcome::Stranded);
+    }
+
+    #[test]
+    fn a_restore_that_still_reads_custom_is_not_trusted() {
+        // Second review, 2026-09-02: the ladder took a successful write as a
+        // successful restore, the very shape the transaction's read-back check
+        // exists for. Writes here return Ok and change nothing; the machine
+        // stays in Custom. The ladder must read back, disbelieve, and escalate
+        // rather than report "restored".
+        let mut io = FakeModeIo::in_mode(SMART_FAN_MODE_CUSTOM);
+        io.writes_ignored = true;
+        let outcome = CustomModeGuard {
+            io: &io,
+            restore_to: 3,
+            armed: true,
+        }
+        .restore_now();
+        assert_eq!(outcome, RestoreOutcome::FullSpeedEngaged);
+        assert_eq!(
+            io.calls(),
+            vec!["write(3)", "read", "write(2)", "read", "full_speed"],
+            "every rung is confirmed by read-back before it counts"
+        );
+    }
+
+    #[test]
+    fn a_restore_that_cannot_be_read_back_is_not_trusted() {
+        // Absence of evidence is not evidence of safety, on this path as on
+        // the transaction's.
+        let mut io = FakeModeIo::unreadable();
+        io.writes_ignored = true;
+        let outcome = CustomModeGuard {
+            io: &io,
+            restore_to: 3,
+            armed: true,
+        }
+        .restore_now();
+        assert_eq!(outcome, RestoreOutcome::FullSpeedEngaged);
+    }
+
+    #[test]
+    fn a_restore_reports_the_mode_read_back_not_the_mode_requested() {
+        // Out of Custom is what matters; the message should still say where
+        // the machine actually is.
+        let io = FakeModeIo::in_mode(3);
+        let outcome = CustomModeGuard {
+            io: &io,
+            restore_to: 1,
+            armed: true,
+        }
+        .restore_now();
+        assert_eq!(outcome, RestoreOutcome::Restored(1));
+        assert_eq!(io.current.get(), Some(1));
+    }
+
+    #[test]
+    fn the_full_speed_outcome_tells_the_user_not_to_disable_it() {
+        // Full speed masks the fans-off state rather than clearing it: the
+        // machine is still in Custom with no curve, and Fan_Set_FullSpeed(0) is
+        // exactly what a user does to silence fans. This text is the only place
+        // the user learns that, so pin it.
+        let text = RestoreOutcome::FullSpeedEngaged.to_string();
+        assert!(text.contains("BEFORE disabling full speed"), "{text}");
+        assert!(text.contains("still in Custom"), "{text}");
+    }
+
+    // -- generated transaction script ---------------------------------------
+
+    /// Print the script for parse-checking against a real Windows PowerShell:
+    /// `cargo test -- --ignored --nocapture emit_curve_transaction_script`
+    #[test]
+    #[ignore = "prints the script for external parse-checking"]
+    fn emit_curve_transaction_script() {
+        println!("{}", build_curve_transaction_script(3, "@(1,0,0,0,0,0)"));
+    }
+
+    #[test]
+    fn script_throws_only_inside_the_try() {
+        // A throw that escapes sets a non-zero exit code, and ps_command
+        // discards stdout in that case -- losing the RESTORED| line in exactly
+        // the failure it exists to report. A throw *inside* the try is caught
+        // and reported through the tags; that is how the read-back check works.
+        let script = build_curve_transaction_script(3, "@(1,0)");
+        let try_at = script.find("try {").expect("a try block");
+        let catch_at = script.find("} catch {").expect("a catch block");
+        let throws: Vec<usize> = script.match_indices("throw").map(|(at, _)| at).collect();
+        assert!(!throws.is_empty(), "the read-back check throws");
+        for at in throws {
+            assert!(
+                at > try_at && at < catch_at,
+                "throw at {at} is outside the try block ({try_at}..{catch_at})"
+            );
+        }
+    }
+
+    #[test]
+    fn script_checks_the_mode_read_back_before_writing_the_table() {
+        // Review finding, 2026-09-02: MODESET was emitted and never checked, so
+        // a silently ignored mode switch would write the table in the wrong
+        // mode and report success. This firmware already ignores
+        // Fan_SetCurrentFanSpeed without error, so that shape is real.
+        let script = build_curve_transaction_script(3, "@(1,0)");
+        let check_at = script
+            .find("if ($now -ne 255) { throw")
+            .expect("a read-back check");
+        let write_at = script.find("Fan_Set_Table").expect("the table write");
+        assert!(check_at < write_at, "the check must precede the write");
+    }
+
+    #[test]
+    fn script_reports_the_exception_message() {
+        // Any throw in the try lands in the catch, not only Fan_Set_Table's, so
+        // the tag carries the message to say which step failed.
+        let script = build_curve_transaction_script(3, "@(1,0)");
+        assert!(script.contains("TABLEWRITE|ERR|$($_.Exception.Message)"));
+    }
+
+    #[test]
+    fn script_restores_in_finally_not_catch() {
+        let script = build_curve_transaction_script(3, "@(1,0)");
+        let finally_at = script.find("finally").expect("a finally block");
+        let restore_at = script.find("RESTORED|").expect("a restore");
+        assert!(
+            restore_at > finally_at,
+            "the restore must live in finally, so it runs on paths catch does not anticipate"
+        );
+    }
+
+    #[test]
+    fn script_skips_the_switch_when_already_custom() {
+        // Re-entering Custom from Custom is not a transition; treating it as one
+        // would aim the restore at Custom, making it a no-op. The guard
+        // condition is present for every previous mode; what makes it a skip
+        // is $prev being 255, so that assertion is the one that carries weight.
+        let script = build_curve_transaction_script(SMART_FAN_MODE_CUSTOM, "@(1,0)");
+        assert!(script.contains("$prev = 255;"));
+        assert!(script.contains("if ($prev -ne 255)"));
+        assert!(
+            build_curve_transaction_script(3, "@(1,0)").contains("$prev = 3;"),
+            "the previous mode is embedded, not hardcoded"
+        );
+    }
+
+    #[test]
+    fn script_emits_every_tag_the_parser_reads() {
+        // Pins the two halves together: a tag renamed on one side only would
+        // leave is_safe() silently reading None forever.
+        let script = build_curve_transaction_script(2, "@(1,0)");
+        for tag in [
+            "PREVMODE|",
+            "MODESET|",
+            "TABLEWRITE|",
+            "RESTORED|",
+            "FINALMODE|",
+        ] {
+            assert!(script.contains(tag), "script must emit {tag}");
+        }
+    }
+
+    #[test]
+    fn script_embeds_the_byte_array_verbatim() {
+        let script = build_curve_transaction_script(3, "@(1,0,0,7,7)");
+        assert!(script.contains("[byte[]]$table = @(1,0,0,7,7);"));
+    }
+
+    // -- curve transaction parsing -----------------------------------------
+
+    #[test]
+    fn transaction_full_success_is_safe() {
+        let tx = parse_curve_transaction("PREVMODE|3\nMODESET|255\nTABLEWRITE|OK\nFINALMODE|255\n");
+        assert_eq!(tx.prev_mode, Some(3));
+        assert_eq!(tx.mode_set, Some(255));
+        assert_eq!(tx.table_write_ok, Some(true));
+        assert_eq!(tx.restored, None);
+        assert!(
+            tx.is_safe(),
+            "a committed write leaves Custom mode legitimately"
+        );
+    }
+
+    #[test]
+    fn transaction_failed_write_but_restored_is_safe() {
+        // PowerShell's finally already put the machine back, so the Rust guard
+        // must stand down even though the operation failed.
+        let tx = parse_curve_transaction(
+            "PREVMODE|3\nMODESET|255\nTABLEWRITE|ERR\nRESTORED|3\nFINALMODE|3\n",
+        );
+        assert_eq!(tx.table_write_ok, Some(false));
+        assert_eq!(tx.restored, Some(3));
+        assert!(
+            tx.is_safe(),
+            "restored out of Custom, so nothing is stranded"
+        );
+    }
+
+    #[test]
+    fn transaction_failed_write_and_failed_restore_is_not_safe() {
+        // The dangerous case: still in Custom, no curve. The guard must fire.
+        let tx = parse_curve_transaction(
+            "PREVMODE|3\nMODESET|255\nTABLEWRITE|ERR\nRESTORED|FAIL\nFINALMODE|255\n",
+        );
+        assert_eq!(tx.restored, None, "FAIL must not parse as a restored mode");
+        assert!(!tx.is_safe());
+    }
+
+    #[test]
+    fn transaction_truncated_output_is_not_safe() {
+        // Says the mode was switched and nothing more. Absence of evidence is
+        // not evidence of safety.
+        let tx = parse_curve_transaction("PREVMODE|3\nMODESET|255\n");
+        assert_eq!(tx.table_write_ok, None);
+        assert!(!tx.is_safe());
+    }
+
+    #[test]
+    fn transaction_empty_output_is_not_safe() {
+        assert!(!parse_curve_transaction("").is_safe());
+    }
+
+    #[test]
+    fn transaction_ignores_unrelated_lines() {
+        let tx = parse_curve_transaction(
+            "WARNING: something\nPREVMODE|2\nrandom noise\nTABLEWRITE|OK\nFINALMODE|255\n",
+        );
+        assert_eq!(tx.prev_mode, Some(2));
+        assert_eq!(tx.table_write_ok, Some(true));
+    }
+
+    #[test]
+    fn transaction_write_ok_outranks_a_missing_final_mode() {
+        // If the write committed, Custom mode is what the user asked for, even
+        // when the closing read never arrived.
+        let tx = parse_curve_transaction("TABLEWRITE|OK\n");
+        assert!(tx.is_safe());
+    }
+
+    #[test]
+    fn transaction_written_outside_custom_is_not_committed() {
+        // The switch was silently ignored: the read-back says 3, the table
+        // write did not throw. The curve is not active, so this is a failure --
+        // but the machine is not in Custom either, so nothing needs restoring.
+        // The script can no longer emit this shape, since it throws on a
+        // non-Custom read-back before writing; this pins the Rust side as belt
+        // and braces should the script ever regress.
+        let tx = parse_curve_transaction("PREVMODE|3\nMODESET|3\nTABLEWRITE|OK\nFINALMODE|3\n");
+        assert!(
+            !tx.committed(),
+            "a table written outside Custom is not active"
+        );
+        assert!(tx.is_safe(), "and the machine is on its BIOS curve");
+    }
+
+    #[test]
+    fn transaction_missing_read_back_does_not_block_a_commit() {
+        // Belt and braces must not out-rank the belt: a missing MODESET line
+        // is not evidence the switch failed. The script-side check is primary.
+        let tx = parse_curve_transaction("TABLEWRITE|OK\n");
+        assert!(tx.committed());
+    }
+
+    #[test]
+    fn transaction_captures_the_error_message() {
+        let tx = parse_curve_transaction(
+            "PREVMODE|3\nMODESET|255\nTABLEWRITE|ERR|Fan_Set_Table: Invalid parameter\nRESTORED|3\nFINALMODE|3\n",
+        );
+        assert_eq!(tx.table_write_ok, Some(false));
+        assert_eq!(
+            tx.table_write_error.as_deref(),
+            Some("Fan_Set_Table: Invalid parameter")
+        );
+        assert!(tx.is_safe());
+    }
+
+    #[test]
+    fn transaction_bare_err_has_no_message() {
+        // Output from a script that predates the message suffix.
+        let tx = parse_curve_transaction("TABLEWRITE|ERR\n");
+        assert_eq!(tx.table_write_ok, Some(false));
+        assert_eq!(tx.table_write_error, None);
+    }
+
+    #[test]
+    fn custom_mode_constant_is_255_not_3() {
+        // Pinned deliberately. `scripts/probe-set-table.ps1` uses 3 and calls it
+        // Custom; 3 is Performance. Verified by read-back on the 82RG,
+        // 2026-08-19.
+        assert_eq!(SMART_FAN_MODE_CUSTOM, 255);
+    }
 
     // -- parse_fan_id -------------------------------------------------------
 
