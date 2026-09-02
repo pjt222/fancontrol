@@ -176,6 +176,12 @@ try {
         exit 0
     }
     $result['lightingMethodPresent'] = $true
+    if (-not ($LightingIds -contains 4)) {
+        # The summary pairs the operator's colour with id 4's state index, the
+        # one field measured to track the mode. Without id 4 every row reads
+        # "(no reading)", which is not a firmware result.
+        Write-ToolLog "WARNING: -LightingIds does not include 4, so the summary will have no state index to pair the colour with."
+    }
 
     $script:StartMode = Get-Mode
     Write-ToolLog ("SmartFanMode at start: " + $script:StartMode)
@@ -299,7 +305,11 @@ try {
         # The early fan reading is taken before the prompt so that it stays
         # early. The prompt blocks for as long as the operator takes; that time
         # counts toward the hold, and only the remainder is slept.
-        $ledSeen = Read-LedObservation -Mode $mode -SinceSwitch $sinceSwitch
+        # Ask about the mode the machine is in, which is the read-back when
+        # there is one; a failed SetSmartFanMode is caught above and would
+        # otherwise have the operator describe a mode the machine never entered.
+        $promptMode = if ($null -ne $readBack) { [int]$readBack } else { $mode }
+        $ledSeen = Read-LedObservation -Mode $promptMode -SinceSwitch $sinceSwitch
 
         # The index above was read about a second after the switch; the colour
         # arrives some seconds later. Re-read the index now, so the pairing in
