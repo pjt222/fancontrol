@@ -73,7 +73,7 @@ pub enum Commands {
         /// be 0. A curve violating any of these is rejected rather than
         /// adjusted.
         ///
-        /// Example: "0,0,0,1,2,4,6,7,8,10"
+        /// Example: "1,1,1,1,2,4,6,7,8,10"
         #[arg(long, value_parser = parse_steps)]
         steps: [u8; 10],
 

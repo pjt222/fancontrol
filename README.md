@@ -38,7 +38,7 @@ fancontrol list --json             # Machine-readable JSON output
 
 # Custom fan curve with config persistence (Lenovo)
 fancontrol set-curve --fan-id 0 --sensor-id 3 \
-  --steps "0,0,0,1,2,4,6,7,8,10" --save
+  --steps "1,1,1,1,2,4,6,7,8,10" --save
 ```
 
 ## Features
@@ -157,10 +157,10 @@ fancontrol table --json          # JSON output
 
 ```bash
 # 10 comma-separated speed step indices (0-10 scale)
-fancontrol set-curve --fan-id 0 --sensor-id 3 --steps "0,0,0,1,2,4,6,7,8,10"
+fancontrol set-curve --fan-id 0 --sensor-id 3 --steps "1,1,1,1,2,4,6,7,8,10"
 
 # Save to config for automatic re-application on startup
-fancontrol set-curve --fan-id 0 --sensor-id 3 --steps "0,0,0,1,2,4,6,7,8,10" --save
+fancontrol set-curve --fan-id 0 --sensor-id 3 --steps "1,1,1,1,2,4,6,7,8,10" --save
 ```
 
 Steps index into the hardware's FanSpeeds array from `LENOVO_FAN_TABLE_DATA`, one step per temperature band, lowest band first. Requires Custom SmartFanMode (auto-switched).

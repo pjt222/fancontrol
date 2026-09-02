@@ -24,6 +24,17 @@ Pairing the read with a mode sweep is the point. A lighting reading taken in one
 mode says nothing; the same reading taken in four modes either varies with the
 mode or does not.
 
+.PARAMETER SafeSteps
+The curve written before the sweep. The default is constant across step
+indices 0-3 on purpose. `encode_fan_table_bytes` hardcodes FSID = 0 and three
+LENOVO_FAN_TABLE_DATA rows exist with different thresholds (sensor 3:
+58,58,58,58,67,...; sensor 0: 34,36,43,127,...), and neither hardware run so far
+can tell which row's thresholds index the table, because both used curves that
+were constant across those indices. A curve that differs there -- the previous
+default 0,0,0,1,... -- is safe under one reading and stops the fans at every
+load temperature under the other. A leading run of 1s never stops the fan in
+any band under any reading; the worst case is 1600 RPM at idle.
+
 .PARAMETER SkipSafeCurve
 Do not write a safe curve before sweeping. The sweep enters Custom mode, and
 Custom mode runs whatever table the EC last received -- which after a probe
@@ -46,7 +57,7 @@ param(
     [int[]]$LightingIds = @(0, 1, 2, 3, 4, 5),
     [int[]]$SweepModes = @(1, 2, 3, 255),
     [int]$DwellSeconds = 6,
-    [string]$SafeSteps = '0,0,0,1,2,4,6,7,8,10',
+    [string]$SafeSteps = '1,1,1,1,2,4,6,7,8,10',
     [switch]$SkipSafeCurve,
     [switch]$Json
 )
@@ -107,7 +118,17 @@ try {
         }
         Write-ToolLog ""
         Write-ToolLog ("Writing safe curve first (" + $SafeSteps + "), so Custom mode is not a fans-off trap.")
-        $out = & $ExePath set-curve --fan-id 0 --sensor-id 3 --steps $SafeSteps 2>&1 | Out-String
+        # Under PowerShell 5.1 with $ErrorActionPreference = 'Stop', the first
+        # stderr line of a native command merged by 2>&1 becomes a terminating
+        # NativeCommandError (measured 2026-09-02 on 5.1.26100). The exe writes
+        # stderr only on failure, so with 'Stop' in force the exit-code check
+        # below could never run in the one case it exists for.
+        $ErrorActionPreference = 'Continue'
+        try {
+            $out = & $ExePath set-curve --fan-id 0 --sensor-id 3 --steps $SafeSteps 2>&1 | Out-String
+        } finally {
+            $ErrorActionPreference = 'Stop'
+        }
         foreach ($line in ($out -split "`r?`n")) {
             if ($line.Trim().Length -gt 0) { Write-ToolLog ("    " + $line.TrimEnd()) }
         }
@@ -179,10 +200,24 @@ try {
         if ($null -ne $fm) {
             try { $fanRpm = Get-WmiPropertyOrNull -InputObject ($fm.Fan_GetCurrentFanSpeed(0)) -Name 'CurrentFanSpeed' } catch { $fanRpm = $null }
         }
-        Write-ToolLog ("  fan 0: " + $fanRpm + " rpm")
+        Write-ToolLog ("  fan 0: " + $fanRpm + " rpm (0.8 s after the switch; spin-up not yet visible)")
 
-        $sweep += New-Object PSObject -Property ([ordered]@{ requested = $mode; readBack = $readBack; fanRpm = $fanRpm })
         Start-Sleep -Seconds $DwellSeconds
+
+        # Second reading after the dwell. The first is taken before a fan can
+        # spin up from 0, so it cannot distinguish "off" from "starting". This
+        # one can, and in Custom mode at idle it is a free measurement: 0 RPM
+        # here means the sensor 3 row (lowest band 58 C) indexes the table and
+        # the EC runs the fan off below its lowest band. 1600 RPM is consistent
+        # with either the sensor 0 row (lowest band 34 C) or an EC that uses
+        # index 0 below band, so only the 0 result is decisive.
+        $fanRpmAfter = $null
+        if ($null -ne $fm) {
+            try { $fanRpmAfter = Get-WmiPropertyOrNull -InputObject ($fm.Fan_GetCurrentFanSpeed(0)) -Name 'CurrentFanSpeed' } catch { $fanRpmAfter = $null }
+        }
+        Write-ToolLog ("  fan 0: " + $fanRpmAfter + " rpm (after " + $DwellSeconds + " s dwell)")
+
+        $sweep += New-Object PSObject -Property ([ordered]@{ requested = $mode; readBack = $readBack; fanRpm = $fanRpm; fanRpmAfterDwell = $fanRpmAfter })
     }
     $result['sweep'] = $sweep
     $result['ok'] = $true

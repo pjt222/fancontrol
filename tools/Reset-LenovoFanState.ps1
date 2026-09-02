@@ -24,6 +24,15 @@ V1 floors, so entering Custom mode after this is uneventful. It is deliberately
 NOT the minimum table: the floors are what the validator accepts, not a curve
 anyone should be left running.
 
+It is also constant across step indices 0-3 on purpose. `encode_fan_table_bytes`
+hardcodes FSID = 0, three LENOVO_FAN_TABLE_DATA rows exist with different
+thresholds (sensor 3: 58,58,58,58,67,...; sensor 0: 34,36,43,127,...), and no
+hardware run so far can tell which row's thresholds index the table, because
+every curve measured has been constant across those indices. The previous
+default 0,0,0,1,... differs there: safe under one reading, fans off at every
+load temperature under the other. A leading run of 1s never stops the fan in
+any band under any reading; the worst case is 1600 RPM at idle.
+
 .PARAMETER Mode
 SmartFanMode to select at the end. 1=Quiet, 2=Balanced, 3=Performance,
 255=Custom. Defaults to whatever the machine was in when the tool started.
@@ -41,7 +50,7 @@ Writes to the EC. Requires elevation.
 param(
     [string]$ExePath,
     [string]$LogPath,
-    [string]$Steps = '0,0,0,1,2,4,6,7,8,10',
+    [string]$Steps = '1,1,1,1,2,4,6,7,8,10',
     [int]$Mode = 0,
     [int]$VerifySeconds = 12,
     [switch]$Json
@@ -103,7 +112,17 @@ if ($Mode -eq 0) {
 # by this tool is one the application can actually produce.
 Write-ToolLog ""
 Write-ToolLog ("Writing safe curve: " + $Steps)
-$output = & $ExePath set-curve --fan-id 0 --sensor-id 3 --steps $Steps 2>&1 | Out-String
+# Under PowerShell 5.1 with $ErrorActionPreference = 'Stop', the first stderr
+# line of a native command merged by 2>&1 becomes a terminating
+# NativeCommandError (measured 2026-09-02 on 5.1.26100). The exe writes stderr
+# only on failure, so with 'Stop' in force the failure branch below could never
+# run in the one case it exists for.
+$ErrorActionPreference = 'Continue'
+try {
+    $output = & $ExePath set-curve --fan-id 0 --sensor-id 3 --steps $Steps 2>&1 | Out-String
+} finally {
+    $ErrorActionPreference = 'Stop'
+}
 foreach ($line in ($output -split "`r?`n")) {
     if ($line.Trim().Length -gt 0) { Write-ToolLog ("    " + $line.TrimEnd()) }
 }
@@ -114,8 +133,14 @@ Write-ToolLog ("  exit code: " + $writeExit)
 if ($writeExit -ne 0) {
     # Leaving Custom selected with a failed write is the exact hazard this tool
     # exists to clear, so get out of Custom before reporting the failure.
-    Write-ToolLog "ERROR: the curve write failed. Returning to the requested mode anyway so Custom is not left selected."
-    try { [void]$gameZone.SetSmartFanMode($Mode) } catch { Write-ToolLog ("  restore failed: " + $_.Exception.Message) }
+    # $Mode defaults to the starting mode, and every successful set-curve
+    # leaves the machine in Custom (255), so from the state this branch most
+    # needs to handle, "return to $Mode" would select Custom again. Balanced
+    # (2) is fan::smart_fan_mode::SAFE_FALLBACK, the same choice the TUI makes
+    # when it clears its held curves.
+    $exitMode = if ($Mode -eq 255) { 2 } else { $Mode }
+    Write-ToolLog ("ERROR: the curve write failed. Selecting mode " + $exitMode + " so Custom is not left selected.")
+    try { [void]$gameZone.SetSmartFanMode($exitMode) } catch { Write-ToolLog ("  restore failed: " + $_.Exception.Message) }
     Write-ToolLog ("SmartFanMode now: " + (Get-Mode))
     $result['ok'] = $false
     New-Object PSObject -Property $result
