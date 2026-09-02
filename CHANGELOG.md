@@ -32,14 +32,35 @@ when the change landed on `main`.
 
   The machine is left on its BIOS curve, which is always safe.
 
-- **A failed curve write no longer leaves the machine in Custom mode.**
-  *(2026-08-19)*
+- **A failed curve write no longer leaves the machine in Custom mode, when
+  fancontrol performed the switch.** *(2026-08-19; limits stated 2026-09-02)*
 
   The mode switch and the table write were two separate fallible steps, so any
   failure of the write returned an error with the fans stopped and no
   indication. They now happen in a single PowerShell invocation whose `finally`
   restores the previous mode, backed by a Rust-side guard that unwinds on every
-  early return and escalates to full speed if the restore itself fails.
+  early return. If the previous mode cannot be restored the guard tries
+  Balanced, and if that fails too it engages full speed.
+
+  Three limits, stated because a review found them unstated:
+
+  - If the machine was **already in Custom** when `set-curve` ran, nothing was
+    switched and nothing is restored: the EC keeps running whatever table it
+    last received, and the error says so. This is the steady state of the
+    TUI's re-apply loop and of every second `set-curve`, and the previous
+    table is by construction whatever the user or tool last put there.
+  - **Full speed masks the fans-off state; it does not clear it.** The machine
+    is still in Custom with no curve, and `Fan_Set_FullSpeed(0)` (`set 0`, the
+    TUI toggle) would stop the fans. The log and the error tell you to select
+    another power mode (Fn+Q, or a successful `set-curve`) *before* disabling
+    full speed.
+  - The error message reports the machine's state *after* the restore has run,
+    not the state the transaction saw before it.
+
+  The transaction also verifies that the mode read back as Custom before
+  writing the table. A silently ignored mode switch would otherwise write the
+  table in the wrong mode and report success; this firmware already ignores
+  `Fan_SetCurrentFanSpeed` without error, so that shape is real.
 
   No change to a successful `set-curve`.
 
