@@ -46,16 +46,19 @@ src/
     ├── linux.rs     # sysfs/hwmon backend
     ├── windows.rs   # Generic WMI backend (Win32_Fan) + is_lenovo() detection
     └── lenovo.rs    # Lenovo Legion backend (LENOVO_FAN_METHOD via PowerShell)
-scripts/                    # One-off probes, kept for their logs
+scripts/                    # One-off March 2026 probes, kept for the record; their .log files are local (gitignored)
 ├── probe-wmi-methods.ps1   # WMI method probe (run on native Windows)
 ├── dump-fan-table.ps1      # Full fan table dump
-├── probe-set-table.ps1     # Fan_Set_Table write probe
-├── probe-wmi-methods.log   # Probe results
-└── dump-fan-table.log      # Table dump results
-tools/                      # Reusable tooling — prefer adding here
+├── probe-set-table.ps1     # Fan_Set_Table write probe (used SmartFanMode 3, so it never entered Custom)
+└── test-fan-set-table.md   # The March 2026 test plan, marked superseded
+tools/                      # Reusable tooling — prefer adding here. Logs and CSVs beside the tools are gitignored
 ├── README.md               # Conventions and a template for new tools
 ├── LenovoWmi.psm1          # Shared module: logging, elevation, BIOS parsing, root\WMI access
-└── Get-GodModeVersion.ps1  # GodMode V1/V2 detection + fan max-speed properties (#25)
+├── Get-GodModeVersion.ps1  # GodMode V1/V2 detection + fan max-speed properties (#25)
+├── Invoke-FanTableLoadTest.ps1  # Holds the CPU above the lowest band and writes curves through the exe (#10). Writes to the EC
+├── Reset-LenovoFanState.ps1     # Leaves a safe curve loaded and a chosen SmartFanMode selected. Writes to the EC
+├── Get-LenovoLedSurface.ps1     # Enumerates LENOVO_* classes and the lighting surface (#44). Read-only
+└── Get-LenovoLighting.ps1       # Lighting status per Lighting_Id across a mode sweep, with an operator colour prompt (#44). Writes to the EC
 ```
 
 **`scripts/` vs `tools/`**: `scripts/` holds historical one-off probes; do not
@@ -156,6 +159,15 @@ does not clear the stored table. Reboot and sleep/wake retention remain
 unmeasured; the "lost on reboot, sleep, or power mode change" note is now known
 to be wrong for the power-mode case only.
 
+**A successful `set-curve` leaves the machine in Custom.** The write transaction
+restores the previous mode only when the write did not commit, so after a
+successful write the machine is in Custom running the new curve until Fn+Q or
+another `set-curve` moves it. A tool that writes a curve and then labels a
+reading "at the starting mode" is wrong from that point on; the lighting probe's
+baseline dump did exactly that on 2026-09-02 and a reviewer read Custom's LED
+index under a "starting mode" header as sensor lag. Read the mode back and label
+readings with what was read.
+
 After any session that writes an experimental curve, run
 `tools/Reset-LenovoFanState.ps1` to leave a safe curve loaded. Otherwise the
 next thing to select Custom mode inherits the experiment.
@@ -205,9 +217,19 @@ only `Lighting_Id` 0 and 4 are real — the other four carry `Lighting_Id = 255`
 `Current_Brightness_Level` and `Current_State_Type`. Across a SmartFanMode sweep
 by `tools/Get-LenovoLighting.ps1`, exactly one field moved:
 `Lighting_Id 4 → Current_State_Type` is 0 in Quiet, 1 in Balanced, 2 in
-Performance, 3 in Custom. It is a state *index*, not a colour; the index-to-colour
-mapping (blue / white / red / all three) still rests on the eye report. Ids 0, 1,
-2, 5 read `0 / 0` and id 3 reads `0 / 1` in every mode; brightness is 0 everywhere.
+Performance, 3 in Custom. It is a state *index*, not a colour. Ids 0, 1, 2, 5
+read `0 / 0` and id 3 reads `0 / 1` in every mode; brightness is 0 everywhere.
+
+**The index-to-colour mapping is measured — attended run 2026-09-02 15:27
+(#44 AC-2).** The probe asks the operator what the power button shows after
+each switch and re-reads the index at the moment of the answer. Operator text
+verbatim: state 0 → `blue` (Quiet), 1 → `white` (Balanced), 2 → `red`
+(Performance), 3 → `all thre (at least red and blue)` (Custom). The index was
+unchanged between the switch and the answer in all four modes. That id 4 *is*
+the power button rests on this four-for-four correlation; the firmware carries
+no label. A UI indicator can therefore read
+`Get_Lighting_Current_Status(4).Current_State_Type` and show a measured state.
+Never call `Set_Lighting_Current_Status`.
 
 **Which sensor row's thresholds index a written table is unmeasured.**
 `encode_fan_table_bytes` hardcodes `FSID = 0`, and the fan 0 / sensor 3 row

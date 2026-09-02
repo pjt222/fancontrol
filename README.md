@@ -164,7 +164,7 @@ fancontrol set-curve --fan-id 0 --sensor-id 3 --steps "1,1,1,1,2,4,6,7,8,10"
 fancontrol set-curve --fan-id 0 --sensor-id 3 --steps "1,1,1,1,2,4,6,7,8,10" --save
 ```
 
-Steps index into the hardware's FanSpeeds array from `LENOVO_FAN_TABLE_DATA`, one step per temperature band, lowest band first. Requires Custom SmartFanMode (auto-switched).
+Steps index into the hardware's FanSpeeds array from `LENOVO_FAN_TABLE_DATA`, one step per temperature band, lowest band first. Requires Custom SmartFanMode: `set-curve` switches to it and, on success, leaves the machine there running the new curve. Fn+Q moves it to Quiet/Balanced/Performance; the curve stays stored in the EC and runs again the next time Custom is selected.
 
 **Step limits.** A curve is rejected outright if it breaks any of these — `set-curve` does not quietly adjust your input:
 

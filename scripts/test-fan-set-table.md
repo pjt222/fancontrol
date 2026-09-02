@@ -2,6 +2,13 @@
 
 Test whether `Fan_Set_Table` actually modifies EC fan curve behavior on Legion 82RG.
 
+> **Superseded, kept as the March 2026 plan.** The question was settled on
+> 2026-08-19 by `tools/Invoke-FanTableLoadTest.ps1` (#10): `Fan_Set_Table`
+> works, and the step scale is a 0-10 index where 0 stops the fan and steps
+> 1-10 map onto table entries 0-9 (#18), so the "index 5 = 3400 RPM" arithmetic
+> below is off by one. The Cleanup section's volatility claim is wrong for the
+> power-mode case; see the note there. Do not run this plan; run the tool.
+
 ## Prerequisites
 
 - Windows native (not WSL)
@@ -75,9 +82,9 @@ Behavior is identical to normal operation without set-curve.
 
 ## Cleanup
 
-The custom curve is volatile -- it resets automatically on:
+~~The custom curve is volatile -- it resets automatically on:~~ **Superseded 2026-08-19:** the EC retains the last written curve across a power-mode change (measured: a curve reactivated 24 minutes later on re-entering Custom, having survived a switch to Performance and back). Reboot and sleep/wake retention are unmeasured. The March 2026 assumption was:
 - Reboot
 - Sleep/wake
 - Power mode change (Fn+Q)
 
-To manually reset, change the power mode with Fn+Q or reboot.
+~~To manually reset, change the power mode with Fn+Q or reboot.~~ Fn+Q only hides a retained curve; it runs again the next time Custom is selected. Run `tools/Reset-LenovoFanState.ps1` to leave a safe curve loaded.
