@@ -6,19 +6,23 @@ Get_Lighting_Current_Status for each Lighting_Id across a SmartFanMode sweep.
 .DESCRIPTION
 The user reports the power-button LED is blue in Quiet, white in Balanced and
 red in Performance, and appears to light all three at once in Custom. This tool
-tests whether any of that is visible to software.
+tests whether any of that is visible to software, and records what the operator
+sees beside what the firmware reports in the same mode.
 
-`Get-LenovoLedSurface.ps1` found the surface but never called the getter, so its
-argument shape and -- the part that matters under this project's conventions --
-its named output property names are unknown. Nothing may be parsed against a
-guessed property name, so this tool dumps every property of every result rather
-than reading one.
+Measured 2026-09-02 (issue #44): `Get_Lighting_Current_Status(<id>)` takes one
+integer and returns `Current_Brightness_Level` and `Current_State_Type`. Across
+the sweep exactly one field moved, `Lighting_Id 4 -> Current_State_Type`: 0 in
+Quiet, 1 in Balanced, 2 in Performance, 3 in Custom. That is a state index, not
+a colour. Which colour each index means still rests on a person looking at the
+button, so after every mode switch the tool asks the operator what they see and
+logs the answer beside the index read in that mode. One attended run therefore
+yields the index-to-colour mapping, printed as a summary block at the end of the
+log. Pass -NoPrompt for an unattended run.
 
-The evidence so far leans towards "not readable": LENOVO_LIGHTING_DATA exposes
-Brightness_Level, Control_Interface, Default_State, Lighting_Id, Lighting_Type
-and State_Type_Num, and nothing colour-shaped anywhere. If that holds, any LED
-indicator in the UI is *derived* from SmartFanMode and must be labelled as such.
-A negative result here is therefore a real result, not a failed run.
+Every property of every result is still dumped rather than parsed, so a firmware
+that names its outputs differently shows up as a dump, not as a silent null. The
+one parsed field is `Current_State_Type` for id 4, read null-safely against the
+measured name.
 
 Pairing the read with a mode sweep is the point. A lighting reading taken in one
 mode says nothing; the same reading taken in four modes either varies with the
@@ -43,8 +47,20 @@ what makes entering Custom safe, so skip this only when the EC state is already
 known.
 
 .PARAMETER DwellSeconds
-How long to hold each mode. Long enough for a person to look at the power button
-and report what they see, since the firmware may not tell us.
+Minimum time to hold each mode before the second fan reading. The time the
+operator spends answering the prompt counts toward it, so an attended run is no
+longer than an unattended one unless the operator is slower than this. The
+second fan reading needs the hold: a fan spinning up from 0 is not visible in
+the first reading, which is taken under two seconds after the switch. Both
+readings log the measured seconds since the switch, not a nominal figure.
+
+.PARAMETER NoPrompt
+Do not ask the operator what colour the power button shows after each mode
+switch. Use for unattended runs. Without it the tool blocks at a Read-Host
+prompt in each mode. An empty answer is logged as "not observed", and a host
+that cannot prompt (for example under -NonInteractive) is logged and skipped
+rather than failing the sweep, since the state index is still worth recording
+without a colour beside it.
 
 .NOTES
 Writes to the EC: changes SmartFanMode, and writes a fan curve unless
@@ -59,6 +75,7 @@ param(
     [int]$DwellSeconds = 6,
     [string]$SafeSteps = '1,1,1,1,2,4,6,7,8,10',
     [switch]$SkipSafeCurve,
+    [switch]$NoPrompt,
     [switch]$Json
 )
 
@@ -78,6 +95,7 @@ Write-ToolLog ""
 $result = [ordered]@{ ok = $false }
 $script:StartMode = $null
 $gz = $null
+$sweep = @()
 
 function Get-Mode {
     try { $r = $gz.GetSmartFanMode() } catch { return $null }
@@ -97,6 +115,45 @@ function Get-FanReading {
         try { $temp = Get-WmiPropertyOrNull -InputObject ($fm.Fan_GetCurrentSensorTemperature(3)) -Name 'CurrentSensorTemperature' } catch { $temp = $null }
     }
     return @{ rpm = $rpm; temp = $temp }
+}
+
+function Get-SecondsSince {
+    # Elapsed seconds on a stopwatch, to one decimal. PowerShell converts
+    # numbers to strings with the invariant culture, so this concatenates as
+    # "2.3" on every locale; a -f format string would follow the OS culture.
+    param([System.Diagnostics.Stopwatch]$Stopwatch)
+    return [Math]::Round($Stopwatch.Elapsed.TotalSeconds, 1)
+}
+
+function Read-LedObservation {
+    # Ask the operator what the power button shows and return the answer
+    # verbatim, trimmed. Three outcomes are kept apart, because they mean
+    # different things in the summary: text (observed), an empty string (the
+    # prompt was shown and nothing was entered), and $null (never asked:
+    # -NoPrompt, or a host that cannot prompt). Read-Host throws under
+    # -NonInteractive and in hosts without a console; that is logged and the
+    # sweep continues, since the state index is worth recording on its own.
+    param(
+        [int]$Mode,
+        [System.Diagnostics.Stopwatch]$SinceSwitch
+    )
+    if ($NoPrompt) { return $null }
+    $answer = $null
+    try {
+        $answer = Read-Host -Prompt ("  Power button colour in mode " + $Mode + " (blue / white / red / all three / off / other; Enter = not observed)")
+    } catch {
+        Write-ToolLog ("  operator prompt unavailable: " + $_.Exception.Message)
+        return $null
+    }
+    if ($null -eq $answer) { $answer = '' }
+    $answer = ([string]$answer).Trim()
+    $when = (Get-SecondsSince $SinceSwitch)
+    if ($answer.Length -eq 0) {
+        Write-ToolLog ("  operator (" + $when + " s after the switch): not observed (empty answer)")
+    } else {
+        Write-ToolLog ("  operator (" + $when + " s after the switch): '" + $answer + "'")
+    }
+    return $answer
 }
 
 try {
@@ -154,7 +211,7 @@ try {
     # --- baseline lighting dump, current mode ------------------------------
     Write-ToolLog ""
     Write-ToolLog "--- Get_Lighting_Current_Status, all ids, at the starting mode ---"
-    Write-ToolLog "Every property is dumped: the output property names are unknown and must not be guessed."
+    Write-ToolLog "Every property is dumped, so a firmware that names its outputs differently shows as a dump and not as a silent null."
     foreach ($id in $LightingIds) {
         Write-ToolLog ("  Lighting_Id " + $id + ":")
         try {
@@ -166,11 +223,13 @@ try {
     }
 
     # --- the sweep ---------------------------------------------------------
-    $sweep = @()
     foreach ($mode in $SweepModes) {
         Write-ToolLog ""
         Write-ToolLog ("=== SmartFanMode -> " + $mode + " ===")
         try { [void]$gz.SetSmartFanMode($mode) } catch { Write-ToolLog ("  SetSmartFanMode error: " + $_.Exception.Message) }
+        # Every timing below is measured from here. The operator prompt makes
+        # the hold variable, so no reading may carry a nominal "N s" label.
+        $sinceSwitch = [System.Diagnostics.Stopwatch]::StartNew()
         Start-Sleep -Milliseconds 800
         $readBack = Get-Mode
         Write-ToolLog ("  mode read back: " + $readBack)
@@ -178,13 +237,22 @@ try {
             Write-ToolLog ("  WARNING: asked for " + $mode + ", got " + $readBack + ". Readings below are for " + $readBack + ".")
         }
 
-        Write-ToolLog ("  >>> LOOK AT THE POWER BUTTON NOW -- holding this mode for " + $DwellSeconds + "s <<<")
+        if ($NoPrompt) {
+            Write-ToolLog ("  >>> LOOK AT THE POWER BUTTON NOW -- holding this mode for at least " + $DwellSeconds + "s <<<")
+        } else {
+            Write-ToolLog "  >>> LOOK AT THE POWER BUTTON NOW -- you will be asked what colour it shows <<<"
+        }
 
+        $state4 = $null
         foreach ($id in $LightingIds) {
             try {
                 $r = $lm.Get_Lighting_Current_Status($id)
                 Write-ToolLog ("  Lighting_Id " + $id + " ->")
                 Write-WmiProperties $r "      "
+                # The one parsed field. The property name is measured
+                # (2026-09-02), not guessed, and Get-WmiPropertyOrNull returns
+                # $null rather than throwing on a firmware that lacks it.
+                if ($id -eq 4) { $state4 = Get-WmiPropertyOrNull -InputObject $r -Name 'Current_State_Type' }
             } catch {
                 Write-ToolLog ("  Lighting_Id " + $id + " -> ERROR: " + $_.Exception.Message)
             }
@@ -208,11 +276,16 @@ try {
         }
 
         $before = Get-FanReading
-        Write-ToolLog ("  fan 0: " + $before.rpm + " rpm, sensor 3: " + $before.temp + " C (0.8 s after the switch; spin-up not yet visible)")
+        Write-ToolLog ("  fan 0: " + $before.rpm + " rpm, sensor 3: " + $before.temp + " C (" + (Get-SecondsSince $sinceSwitch) + " s after the switch; spin-up not yet visible)")
 
-        Start-Sleep -Seconds $DwellSeconds
+        # The early fan reading is taken before the prompt so that it stays
+        # early. The prompt blocks for as long as the operator takes; that time
+        # counts toward the hold, and only the remainder is slept.
+        $ledSeen = Read-LedObservation -Mode $mode -SinceSwitch $sinceSwitch
+        $remainingSeconds = $DwellSeconds - $sinceSwitch.Elapsed.TotalSeconds
+        if ($remainingSeconds -gt 0) { Start-Sleep -Milliseconds ([int][Math]::Ceiling($remainingSeconds * 1000)) }
 
-        # Second reading after the dwell. The first is taken before a fan can
+        # Second reading after the hold. The first is taken before a fan can
         # spin up from 0, so it cannot distinguish "off" from "starting". This
         # one can. In Custom mode it bears on the open table-mapping question
         # (see CLAUDE.md), but only together with the temperature beside it:
@@ -224,9 +297,15 @@ try {
         # run sat at 2000-2500 RPM in every mode with no temperature logged, so
         # it settled nothing; that is why the temperature is logged now.
         $after = Get-FanReading
-        Write-ToolLog ("  fan 0: " + $after.rpm + " rpm, sensor 3: " + $after.temp + " C (after " + $DwellSeconds + " s dwell)")
+        Write-ToolLog ("  fan 0: " + $after.rpm + " rpm, sensor 3: " + $after.temp + " C (" + (Get-SecondsSince $sinceSwitch) + " s after the switch; hold was at least " + $DwellSeconds + " s)")
 
-        $sweep += New-Object PSObject -Property ([ordered]@{ requested = $mode; readBack = $readBack; fanRpm = $before.rpm; sensor3C = $before.temp; fanRpmAfterDwell = $after.rpm; sensor3CAfterDwell = $after.temp })
+        $sweep += New-Object PSObject -Property ([ordered]@{
+            requested = $mode; readBack = $readBack
+            stateType4 = $state4; ledSeen = $ledSeen
+            fanRpm = $before.rpm; sensor3C = $before.temp
+            fanRpmAfterDwell = $after.rpm; sensor3CAfterDwell = $after.temp
+            secondsAfterSwitch = (Get-SecondsSince $sinceSwitch)
+        })
     }
     $result['sweep'] = $sweep
     $result['ok'] = $true
@@ -240,9 +319,22 @@ try {
     }
 }
 
+if ($sweep.Count -gt 0) {
+    # The #44 answer in one place: the firmware's state index and the colour a
+    # person saw, per mode, instead of 150 lines apart.
+    Write-ToolLog ""
+    Write-ToolLog "--- Operator observations beside the firmware state index (Lighting_Id 4, Current_State_Type) ---"
+    foreach ($row in $sweep) {
+        $seen = if ($null -eq $row.ledSeen) { '(not asked)' }
+                elseif ($row.ledSeen.Length -eq 0) { '(not observed)' }
+                else { $row.ledSeen }
+        Write-ToolLog ("  mode " + $row.requested + " (read back " + $row.readBack + "): state " + $row.stateType4 + " -> " + $seen)
+    }
+}
+
 Write-ToolLog ""
 Write-ToolLog "Read the dumps above with one question in mind: does ANY field differ between modes?"
-Write-ToolLog "If none does, the colour is not readable here and the UI indicator must be derived and labelled so."
+Write-ToolLog "On 2026-09-02 only Lighting_Id 4's Current_State_Type did. If nothing does, the colour is not readable here and the UI indicator must be derived and labelled so."
 Write-ToolLog ("Log: " + $LogPath)
 
 if ($Json) { New-Object PSObject -Property $result | ConvertTo-Json -Depth 5 }
