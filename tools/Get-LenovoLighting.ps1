@@ -53,10 +53,10 @@ Minimum time to hold each mode before the second fan reading. The time the
 operator spends answering the prompt counts toward it, so an attended run is no
 longer than an unattended one unless the operator is slower than this. The
 second fan reading needs the hold: a fan spinning up from 0, or settling from
-the previous mode, is not visible in the first reading, which is taken a few
-seconds after the switch (the 2026-09-02 log puts it at about 3 s, where the
-label said 0.8 s). Both readings log the measured seconds since the switch, not
-a nominal figure. For the second reading to bear on the table-mapping question
+the previous mode, is not visible in the first reading, which is taken about a
+second after SetSmartFanMode returns (1.1 s in the 2026-09-02 15:27 log; the
+0.8 s the old label claimed was nominal). Both readings log the measured
+seconds since the switch, not a nominal figure. For the second reading to bear on the table-mapping question
 in CLAUDE.md the hold must exceed the fan's roughly 30 s ramp; the default does
 not, and the reading's label says so.
 
