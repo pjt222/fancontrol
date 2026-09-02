@@ -959,12 +959,28 @@ impl FanController for LenovoFanController {
         // subprocess calls, where nothing at all runs if this process dies
         // between them.
         //
-        // Nothing here throws. A throw sets a non-zero exit code, and
-        // `ps_command` discards stdout in that case, which would lose the very
-        // lines describing the failure.
+        // No throw escapes the script: the one inside its `try` is caught and
+        // reported through the tags. An escaping throw would set a non-zero
+        // exit code, and `ps_command` discards stdout in that case, which would
+        // lose the very lines describing the failure.
         let script = build_curve_transaction_script(previous_mode, &ps_array);
 
-        let output = Self::ps_command(&script)?;
+        // If PowerShell itself fails -- no launch, or a non-zero exit because
+        // something outside the try threw -- there are no tags to read. The
+        // guard would restore on drop anyway; restoring explicitly here puts
+        // the outcome into the error, as the tagged paths below do.
+        let output = match Self::ps_command(&script) {
+            Ok(output) => output,
+            Err(e) => {
+                let aftermath = match guard.take() {
+                    Some(g) => format!("; {}", g.restore_now()),
+                    None => String::new(),
+                };
+                return Err(FanControlError::Platform(format!(
+                    "curve write transaction did not run to completion: {e}{aftermath}"
+                )));
+            }
+        };
         let transaction = parse_curve_transaction(&output);
         debug!("curve transaction: {transaction:?}");
 
