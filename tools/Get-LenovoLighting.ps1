@@ -282,6 +282,25 @@ try {
         # early. The prompt blocks for as long as the operator takes; that time
         # counts toward the hold, and only the remainder is slept.
         $ledSeen = Read-LedObservation -Mode $mode -SinceSwitch $sinceSwitch
+
+        # The index above was read about a second after the switch; the colour
+        # arrives some seconds later. Re-read the index now, so the pairing in
+        # the summary is between two readings taken at the same moment and not
+        # on the assumption that the index held still while the operator typed.
+        $state4AtAnswer = $null
+        if ($null -ne $ledSeen -and ($LightingIds -contains 4)) {
+            try {
+                $state4AtAnswer = Get-WmiPropertyOrNull -InputObject ($lm.Get_Lighting_Current_Status(4)) -Name 'Current_State_Type'
+            } catch {
+                Write-ToolLog ("  Lighting_Id 4 re-read at the answer -> ERROR: " + $_.Exception.Message)
+            }
+            if ("$state4AtAnswer" -ne "$state4") {
+                Write-ToolLog ("  WARNING: Lighting_Id 4 Current_State_Type was " + $state4 + " after the switch and " + $state4AtAnswer + " when the operator answered.")
+            } else {
+                Write-ToolLog ("  Lighting_Id 4 Current_State_Type at the answer: " + $state4AtAnswer + " (unchanged)")
+            }
+        }
+
         $remainingSeconds = $DwellSeconds - $sinceSwitch.Elapsed.TotalSeconds
         if ($remainingSeconds -gt 0) { Start-Sleep -Milliseconds ([int][Math]::Ceiling($remainingSeconds * 1000)) }
 
@@ -301,7 +320,7 @@ try {
 
         $sweep += New-Object PSObject -Property ([ordered]@{
             requested = $mode; readBack = $readBack
-            stateType4 = $state4; ledSeen = $ledSeen
+            stateType4 = $state4; stateType4AtAnswer = $state4AtAnswer; ledSeen = $ledSeen
             fanRpm = $before.rpm; sensor3C = $before.temp
             fanRpmAfterDwell = $after.rpm; sensor3CAfterDwell = $after.temp
             secondsAfterSwitch = (Get-SecondsSince $sinceSwitch)
@@ -328,7 +347,11 @@ if ($sweep.Count -gt 0) {
         $seen = if ($null -eq $row.ledSeen) { '(not asked)' }
                 elseif ($row.ledSeen.Length -eq 0) { '(not observed)' }
                 else { $row.ledSeen }
-        Write-ToolLog ("  mode " + $row.requested + " (read back " + $row.readBack + "): state " + $row.stateType4 + " -> " + $seen)
+        $state = if ($null -eq $row.stateType4) { '(no reading)' } else { [string]$row.stateType4 }
+        if ($null -ne $row.stateType4AtAnswer -and "$($row.stateType4AtAnswer)" -ne "$($row.stateType4)") {
+            $state = $state + " after the switch, " + $row.stateType4AtAnswer + " at the answer"
+        }
+        Write-ToolLog ("  mode " + $row.requested + " (read back " + $row.readBack + "): state " + $state + " -> " + $seen)
     }
 }
 
