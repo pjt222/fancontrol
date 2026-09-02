@@ -196,14 +196,28 @@ firmware, so LLT's `GetDefaultFanMaxSpeedAsync` would fail here;
 `CurrentFanMaxSpeed` is the usable source and makes the stubbed
 `Fan_Get_MaxSpeed` unnecessary.
 
-**Power-button LED surface (discovered 2026-08-19).** `LENOVO_LIGHTING_METHOD`
-exists with `Get_Lighting_Current_Status` / `Set_Lighting_Current_Status`, and
-`LENOVO_LIGHTING_DATA` reports 6 instances of which only `Lighting_Id` 0 and 4
-are real — the other four carry `Lighting_Id = 255` and look like placeholders.
+**Power-button LED state is readable — measured 2026-09-02 (#44).**
+`LENOVO_LIGHTING_METHOD` exists with `Get_Lighting_Current_Status` /
+`Set_Lighting_Current_Status`; `LENOVO_LIGHTING_DATA` reports 6 instances of which
+only `Lighting_Id` 0 and 4 are real — the other four carry `Lighting_Id = 255`.
 `LENOVO_SPECTRUM_METHOD` and `LENOVO_GAMEZONE_LIGHT_PROFILE_DATA` are absent.
-Whether the power-button colour is readable from these is **not yet established**;
-`tools/Get-LenovoLedSurface.ps1` enumerates the surface, but no per-`Lighting_Id`
-read has been paired against a mode sweep yet.
+`Get_Lighting_Current_Status(<id>)` takes one integer and returns
+`Current_Brightness_Level` and `Current_State_Type`. Across a SmartFanMode sweep
+by `tools/Get-LenovoLighting.ps1`, exactly one field moved:
+`Lighting_Id 4 → Current_State_Type` is 0 in Quiet, 1 in Balanced, 2 in
+Performance, 3 in Custom. It is a state *index*, not a colour; the index-to-colour
+mapping (blue / white / red / all three) still rests on the eye report. Ids 0, 1,
+2, 5 read `0 / 0` and id 3 reads `0 / 1` in every mode; brightness is 0 everywhere.
+
+**Which sensor row's thresholds index a written table is unmeasured.**
+`encode_fan_table_bytes` hardcodes `FSID = 0`, and the fan 0 / sensor 3 row
+starts `58,58,58,58,67` while the fan 0 / sensor 0 row starts `34,36,43,127`.
+Both load tests used curves constant across indices 0–3, so neither can tell. A
+curve that differs there is safe under one reading and stops the fans at every
+load temperature under the other, which is why the tools' default safe curve is
+`1,1,1,1,2,4,6,7,8,10` and not `0,0,0,1,…`. Settling it needs a curve that
+differs across those indices, a hold at 58–66 °C, the sensor temperature logged
+beside the RPM, and a dwell longer than the fan's ~30 s ramp.
 
 Issue #18, **resolved 2026-08-19 by the AC-2 load test**: reading (a) is
 correct — **step 0 means the fan is off.** The table holds 10 entries (indices
