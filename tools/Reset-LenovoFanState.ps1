@@ -11,8 +11,9 @@ retention is useful, but it means a test run that ends with a deliberately
 unsafe curve leaves a trap behind: the machine looks fine in Quiet, Balanced or
 Performance, and stops its fans the moment anything selects Custom.
 
-This tool disarms that trap. It writes a safe curve, confirms the fans respond to
-it, then returns the machine to the requested mode.
+This tool disarms that trap. It writes a safe curve, logs the fan and
+temperature readings for the record, then returns the machine to the requested
+mode.
 
 Run it after any session that wrote an experimental curve -- in particular after
 `Invoke-FanTableLoadTest.ps1`, whose whole purpose is writing curves that would
@@ -38,10 +39,12 @@ SmartFanMode to select at the end. 1=Quiet, 2=Balanced, 3=Performance,
 255=Custom. Defaults to whatever the machine was in when the tool started.
 
 .PARAMETER VerifySeconds
-How long to watch the fans after the write before switching modes. The check is
-"did the fans respond at all", not "is the curve correct" -- at idle the machine
-sits below the lowest temperature threshold, where no curve distinguishes itself.
-A zero reading here is only meaningful if the CPU is above about 58 C.
+How long to watch the fans after the write before switching modes. The readings
+are logged, not evaluated: at idle the machine sits below the lowest temperature
+threshold, where every curve stops the fans, so a zero reading proves nothing
+unless the CPU is above about 58 C, and this tool cannot arrange that. Read the
+log with the temperature beside each reading in mind. A failed RPM read is
+counted separately rather than recorded as 0.
 
 .NOTES
 Writes to the EC. Requires elevation.
@@ -151,6 +154,7 @@ Write-ToolLog ""
 Write-ToolLog ("Watching fans for " + $VerifySeconds + "s ...")
 $deadline = (Get-Date).AddSeconds($VerifySeconds)
 $readings = @()
+$nullReads = 0
 while ((Get-Date) -lt $deadline) {
     $t = $null
     try {
@@ -159,11 +163,14 @@ while ((Get-Date) -lt $deadline) {
     } catch { $t = $null }
     $r0 = Get-Rpm -FanId 0
     $r1 = Get-Rpm -FanId 1
-    $readings += [int]$r0
+    # [int]$null is 0, which would record a failed read as "fan stopped".
+    if ($null -ne $r0) { $readings += [int]$r0 } else { $nullReads += 1 }
     Write-ToolLog ("  s3={0}C  f0={1}rpm  f1={2}rpm" -f $t, $r0, $r1)
     Start-Sleep -Seconds 2
 }
 $result['rpmReadings'] = $readings
+$result['rpmReadNulls'] = $nullReads
+if ($nullReads -gt 0) { Write-ToolLog ("  " + $nullReads + " fan 0 read(s) returned nothing and are not in rpmReadings.") }
 
 Write-ToolLog ""
 Write-ToolLog ("Selecting SmartFanMode " + $Mode + ".")

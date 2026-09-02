@@ -88,6 +88,17 @@ function Get-Mode {
     return $null
 }
 
+function Get-FanReading {
+    # Fan 0 RPM and sensor 3 temperature together: an RPM without the
+    # temperature beside it cannot be read against any curve.
+    $rpm = $null; $temp = $null
+    if ($null -ne $fm) {
+        try { $rpm = Get-WmiPropertyOrNull -InputObject ($fm.Fan_GetCurrentFanSpeed(0)) -Name 'CurrentFanSpeed' } catch { $rpm = $null }
+        try { $temp = Get-WmiPropertyOrNull -InputObject ($fm.Fan_GetCurrentSensorTemperature(3)) -Name 'CurrentSensorTemperature' } catch { $temp = $null }
+    }
+    return @{ rpm = $rpm; temp = $temp }
+}
+
 try {
     if (-not (Test-Elevated)) { Write-ToolLog "FATAL: not elevated."; exit 1 }
 
@@ -196,28 +207,26 @@ try {
             Write-ToolLog ("      ERROR: " + $_.Exception.Message)
         }
 
-        $fanRpm = $null
-        if ($null -ne $fm) {
-            try { $fanRpm = Get-WmiPropertyOrNull -InputObject ($fm.Fan_GetCurrentFanSpeed(0)) -Name 'CurrentFanSpeed' } catch { $fanRpm = $null }
-        }
-        Write-ToolLog ("  fan 0: " + $fanRpm + " rpm (0.8 s after the switch; spin-up not yet visible)")
+        $before = Get-FanReading
+        Write-ToolLog ("  fan 0: " + $before.rpm + " rpm, sensor 3: " + $before.temp + " C (0.8 s after the switch; spin-up not yet visible)")
 
         Start-Sleep -Seconds $DwellSeconds
 
         # Second reading after the dwell. The first is taken before a fan can
         # spin up from 0, so it cannot distinguish "off" from "starting". This
-        # one can, and in Custom mode at idle it is a free measurement: 0 RPM
-        # here means the sensor 3 row (lowest band 58 C) indexes the table and
-        # the EC runs the fan off below its lowest band. 1600 RPM is consistent
-        # with either the sensor 0 row (lowest band 34 C) or an EC that uses
-        # index 0 below band, so only the 0 result is decisive.
-        $fanRpmAfter = $null
-        if ($null -ne $fm) {
-            try { $fanRpmAfter = Get-WmiPropertyOrNull -InputObject ($fm.Fan_GetCurrentFanSpeed(0)) -Name 'CurrentFanSpeed' } catch { $fanRpmAfter = $null }
-        }
-        Write-ToolLog ("  fan 0: " + $fanRpmAfter + " rpm (after " + $DwellSeconds + " s dwell)")
+        # one can. In Custom mode it bears on the open table-mapping question
+        # (see CLAUDE.md), but only together with the temperature beside it:
+        # 0 RPM with sensor 3 between 34 and 58 C means the sensor 3 row
+        # (lowest band 58 C) indexes the table and the EC runs the fan off
+        # below its lowest band, since under the sensor 0 row (lowest band
+        # 34 C) a band would already match. Any non-zero reading, and any
+        # reading at 58 C or above, is consistent with both rows. The 2026-09-02
+        # run sat at 2000-2500 RPM in every mode with no temperature logged, so
+        # it settled nothing; that is why the temperature is logged now.
+        $after = Get-FanReading
+        Write-ToolLog ("  fan 0: " + $after.rpm + " rpm, sensor 3: " + $after.temp + " C (after " + $DwellSeconds + " s dwell)")
 
-        $sweep += New-Object PSObject -Property ([ordered]@{ requested = $mode; readBack = $readBack; fanRpm = $fanRpm; fanRpmAfterDwell = $fanRpmAfter })
+        $sweep += New-Object PSObject -Property ([ordered]@{ requested = $mode; readBack = $readBack; fanRpm = $before.rpm; sensor3C = $before.temp; fanRpmAfterDwell = $after.rpm; sensor3CAfterDwell = $after.temp })
     }
     $result['sweep'] = $sweep
     $result['ok'] = $true
