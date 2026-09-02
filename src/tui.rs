@@ -410,8 +410,9 @@ fn enforce_non_decreasing(steps: &mut [u8; 10], idx: usize) {
 ///
 /// Floors are read from [`MINIMUM_STEPS`], the same constant the validator
 /// checks against, so the rule that repairs a curve cannot drift from the rule
-/// that rejects one. Whether a step of 0 actually stops the fans is unsettled;
-/// see [`validate_custom_curve`] and issue #18.
+/// that rejects one. A step of 0 stops the fan (measured 2026-08-19, #18), so
+/// a repaired curve with zeros in its low bands runs with the fans off there;
+/// see [`validate_custom_curve`].
 ///
 /// Output is guaranteed to satisfy `validate_custom_curve`, which needs three
 /// things this function supplies in order:

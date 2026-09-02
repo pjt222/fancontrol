@@ -153,10 +153,14 @@ fn step_band_label(index: usize) -> &'static str {
 
 /// A user-defined custom fan curve to write to the EC via Fan_Set_Table.
 ///
-/// The `steps` array contains 10 speed step indices (0–10 scale) that index
-/// into the hardware's FanSpeeds array from `LENOVO_FAN_TABLE_DATA`.
-/// For example, on an 82RG with FanSpeeds = [1600,1800,...,4800]:
-///   step index 0 → 1600 RPM, step index 9 → 4800 RPM.
+/// The `steps` array contains 10 speed step values on a 0–10 scale, one per
+/// temperature band, lowest band first. **Step 0 stops the fan**; steps 1–10
+/// map onto the hardware's ten `FanTable_Data` entries from
+/// `LENOVO_FAN_TABLE_DATA`. Measured on an 82RG, 2026-08-19 (#10, #18): with
+/// `FanTable_Data = [1600,1800,...,4800]`, an all-10s curve gave 4800 RPM and a
+/// curve of [`MINIMUM_STEPS`] held both fans at 0 RPM at 58–62 °C under load.
+/// Which sensor row's thresholds select the band is not yet measured; the
+/// encoder hardcodes `FSID = 0` (#42).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub struct CustomFanCurve {
@@ -197,13 +201,14 @@ pub struct CustomFanCurve {
 ///
 /// **What the step 7 floor does and does not claim.** Both tables require ≥ 1
 /// at step 7, which is the whole justification for enforcing it — it is
-/// upstream parity under either. It is *not* known to be an off-versus-on
-/// guarantee. Whether step value 0 means "fans off" or the lowest table entry
-/// (~1600 RPM on the 82RG) is exactly the open question in issue #18, and this
-/// crate documents both readings: [`CustomFanCurve`] describes steps as direct
-/// indices where 0 → 1600 RPM, while [`MAX_STEP_VALUE`] of 10 makes an
-/// eleven-value scale over a ten-entry table, which fits 0 = off. Do not read
-/// a thermal guarantee into this floor until #18 settles it.
+/// upstream parity under either. It is also, since 2026-08-19, known to be an
+/// off-versus-on line: **step 0 stops the fan** (#18 AC-2, measured with
+/// [`MINIMUM_STEPS`] in force, both fans at 0 RPM across 17 samples at
+/// 58–62 °C under load). So a curve whose low bands are 0 really does run the
+/// machine with its fans stopped up to the first non-zero band. The floors
+/// permit that on steps 0–6; the floor of 1 on step 7 is where the fan is
+/// guaranteed to turn. That is a design decision to make deliberately, not a
+/// limit the firmware imposes.
 ///
 /// The non-decreasing rule is ours, not upstream's — LLT enforces no
 /// monotonicity at all. It is kept as a deliberate safety choice.

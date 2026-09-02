@@ -46,7 +46,7 @@ fancontrol set-curve --fan-id 0 --sensor-id 3 \
 - **CLI** with subcommands: `list`, `get`, `set`, `monitor`, `table`, `set-curve`, `tui`, `gui`
 - **JSON output** (`--json`) for `list`, `get`, and `table` commands
 - **TUI dashboard** (ratatui) with viridis color scheme, real-time fan/temp display, interactive curve editor, and keyboard-driven controls
-- **GUI** (egui/eframe) with per-fan sliders, curve editor, SmartFanMode display, and real-time polling
+- **GUI** (egui/eframe) with per-fan sliders, EC fan-curve display, and real-time polling. No curve editor or SmartFanMode display yet; those exist only on the unmerged `phase-4-5-config-gui-curves` branch, and #44 tracks the mode display
 - **Config persistence** — save custom curves to `fancontrol.json` with `--save`; auto-reapplied on startup
 - **Custom fan curves** for Lenovo Legion via `Fan_Set_Table` with safety validation
 - **Linux**: sysfs/hwmon backend — reads `fan*_input`, writes `pwm*`
@@ -244,8 +244,8 @@ Default log level is Warn.
 - Linux backend requires root or appropriate permissions for PWM write access
 - Windows generic `Win32_Fan` is read-only — vendor-specific WMI is needed for control
 - Lenovo WMI `Fan_Get_Table` and `Fan_Get_MaxSpeed` return empty data on some firmware
-- `Fan_Set_Table` call succeeds but behavioral effect is unverified at idle temperatures (needs load test above 58°C)
-- Custom curves are volatile at the hardware level (lost on reboot, sleep/wake, or Fn+Q power mode change) — use `--save` or the TUI `s` key to persist curves for automatic re-application on startup
+- `Fan_Set_Table` is confirmed working on the Legion 82RG (#10, load test 2026-08-19: an all-10s curve held 4800 RPM at 61–64 °C where the no-write control sat at 0 RPM), but only fan 0 / sensor 3 has been exercised, and `--fan-id` / `--sensor-id` are accepted without being encoded (#42)
+- The EC **retains** the last written curve across power-mode switches (measured 2026-08-19; the earlier "lost on power mode change" note here was wrong). Reboot and sleep/wake retention are unmeasured. A retained curve is *latent*: it runs whenever anything selects Custom mode, so leave a safe one behind after experiments (`tools/Reset-LenovoFanState.ps1`). Use `--save` or the TUI `s` key to persist curves for automatic re-application on startup
 
 ## Acknowledgments
 

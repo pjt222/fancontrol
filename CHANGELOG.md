@@ -113,7 +113,10 @@ when the change landed on `main`.
 - Custom fan curve support for Lenovo Legion via `Fan_Set_Table`, with config
   persistence to `fancontrol.json`.
 - TUI dashboard (ratatui) with an interactive curve editor.
-- GUI (egui/eframe) with per-fan sliders and SmartFanMode display.
+- GUI (egui/eframe) with per-fan sliders and EC fan-curve display. *(Corrected
+  2026-09-02: this line claimed a SmartFanMode display; `src/gui.rs` has none.
+  The mode display and curve editor exist only on the unmerged
+  `phase-4-5-config-gui-curves` branch. #44 tracks the mode display.)*
 - `tools/` for reusable Windows tooling, built on `tools/LenovoWmi.psm1`.
 
 ### Fixed
