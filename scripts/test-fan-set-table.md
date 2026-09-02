@@ -4,10 +4,15 @@ Test whether `Fan_Set_Table` actually modifies EC fan curve behavior on Legion 8
 
 > **Superseded, kept as the March 2026 plan.** The question was settled on
 > 2026-08-19 by `tools/Invoke-FanTableLoadTest.ps1` (#10): `Fan_Set_Table`
-> works, and the step scale is a 0-10 index where 0 stops the fan and steps
-> 1-10 map onto table entries 0-9 (#18), so the "index 5 = 3400 RPM" arithmetic
-> below is off by one. The Cleanup section's volatility claim is wrong for the
-> power-mode case; see the note there. Do not run this plan; run the tool.
+> works. The step scale is a 0-10 index. Measured points: step 0 stops the fan
+> (2026-08-19, #18), step 1 gives `FanTable_Data[0]` = 1600 RPM (one reading
+> after a 33 s hold, 2026-09-02) and step 10 gives `FanTable_Data[9]` = 4800 RPM
+> (2026-08-19). Steps 2-9 are taken to map linearly onto entries 1-8; that is
+> inferred, not measured. Under that inference the "index 5 = 3400 RPM"
+> arithmetic below is off by one, and every "1600 RPM (index 0)" statement
+> below is wrong outright, because step 0 is fan-off. The Cleanup section's
+> volatility claim is wrong for the power-mode case; see the note there. Do
+> not run this plan; run the tool.
 
 ## Prerequisites
 
