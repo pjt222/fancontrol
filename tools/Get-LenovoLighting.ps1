@@ -44,7 +44,9 @@ Do not write a safe curve before sweeping. The sweep enters Custom mode, and
 Custom mode runs whatever table the EC last received -- which after a probe
 session may be a curve that stops the fans. Writing a known-good curve first is
 what makes entering Custom safe, so skip this only when the EC state is already
-known.
+known. Note that the operator prompt holds each mode, Custom included, for as
+long as the operator takes to answer; with this switch that is a hold on an
+unknown table.
 
 .PARAMETER DwellSeconds
 Minimum time to hold each mode before the second fan reading. The time the
@@ -69,6 +71,17 @@ without a colour beside it.
 .NOTES
 Writes to the EC: changes SmartFanMode, and writes a fan curve unless
 -SkipSafeCurve. Requires elevation. Returns to the starting mode at the end.
+
+The operator prompt makes the hold per mode open-ended: the tool sits at
+Read-Host, in a mode it selected, until the operator answers. With the safe
+curve written that is a machine in Custom on a curve whose lowest band is 1
+(about 1600 RPM at idle), not fans-off. Two ways out of the prompt are not
+equal. Ctrl+C is a pipeline stop and should reach the finally that restores
+the start mode, but that has not been measured at a Read-Host prompt in this
+tool (one test settles it: Ctrl+C at the first prompt, then read the mode
+back). Closing the console window terminates the process, and no finally
+runs; the machine stays in whatever mode the sweep had reached. Answer the
+prompt, or Ctrl+C; do not close the window.
 #>
 [CmdletBinding()]
 param(

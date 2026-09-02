@@ -13,7 +13,7 @@ and built on.
 | `Invoke-FanTableLoadTest.ps1` | Holds the CPU above the lowest curve threshold and writes a curve through `fancontrol.exe`, to decide whether `Fan_Set_Table` reaches the EC (issue #10). **Writes to the EC** |
 | `Reset-LenovoFanState.ps1` | Leaves a safe curve loaded and a chosen SmartFanMode selected. Run after any session that wrote an experimental curve. **Writes to the EC** |
 | `Get-LenovoLedSurface.ps1` | Enumerates the `LENOVO_*` classes and the lighting surface, for the power-button LED indicator work. Read-only |
-| `Get-LenovoLighting.ps1` | Invokes `Get_Lighting_Current_Status` per `Lighting_Id` across a SmartFanMode sweep, to decide whether the power-button LED colour is readable at all. After each switch it asks the operator what colour the button shows and logs the answer beside the firmware's state index, so one attended run yields the index-to-colour mapping (`-NoPrompt` for unattended runs). Writes a safe curve first, so entering Custom mid-sweep is not a fans-off trap. **Writes to the EC** |
+| `Get-LenovoLighting.ps1` | Invokes `Get_Lighting_Current_Status` per `Lighting_Id` across a SmartFanMode sweep, to decide whether the power-button LED colour is readable at all. After each switch it asks the operator what colour the button shows and logs the answer beside the firmware's state index, so one attended run yields the index-to-colour mapping (`-NoPrompt` for unattended runs). The prompt holds the selected mode until answered, so answer it or Ctrl+C; closing the window skips the mode restore. Writes a safe curve first, so entering Custom mid-sweep is not a fans-off trap. **Writes to the EC** |
 
 ## Running
 
