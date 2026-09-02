@@ -50,9 +50,13 @@ known.
 Minimum time to hold each mode before the second fan reading. The time the
 operator spends answering the prompt counts toward it, so an attended run is no
 longer than an unattended one unless the operator is slower than this. The
-second fan reading needs the hold: a fan spinning up from 0 is not visible in
-the first reading, which is taken under two seconds after the switch. Both
-readings log the measured seconds since the switch, not a nominal figure.
+second fan reading needs the hold: a fan spinning up from 0, or settling from
+the previous mode, is not visible in the first reading, which is taken a few
+seconds after the switch (the 2026-09-02 log puts it at about 3 s, where the
+label said 0.8 s). Both readings log the measured seconds since the switch, not
+a nominal figure. For the second reading to bear on the table-mapping question
+in CLAUDE.md the hold must exceed the fan's roughly 30 s ramp; the default does
+not, and the reading's label says so.
 
 .PARAMETER NoPrompt
 Do not ask the operator what colour the power button shows after each mode
@@ -290,7 +294,7 @@ try {
         }
 
         $before = Get-FanReading
-        Write-ToolLog ("  fan 0: " + $before.rpm + " rpm, sensor 3: " + $before.temp + " C (" + (Get-SecondsSince $sinceSwitch) + " s after the switch; spin-up not yet visible)")
+        Write-ToolLog ("  fan 0: " + $before.rpm + " rpm, sensor 3: " + $before.temp + " C (" + (Get-SecondsSince $sinceSwitch) + " s after the switch)")
 
         # The early fan reading is taken before the prompt so that it stays
         # early. The prompt blocks for as long as the operator takes; that time
@@ -322,19 +326,27 @@ try {
         $remainingSeconds = $DwellSeconds - $sinceSwitch.Elapsed.TotalSeconds
         if ($remainingSeconds -gt 0) { Start-Sleep -Milliseconds ([int][Math]::Ceiling($remainingSeconds * 1000)) }
 
-        # Second reading after the hold. The first is taken before a fan can
-        # spin up from 0, so it cannot distinguish "off" from "starting". This
-        # one can. In Custom mode it bears on the open table-mapping question
-        # (see CLAUDE.md), but only together with the temperature beside it:
-        # 0 RPM with sensor 3 between 34 and 58 C means the sensor 3 row
-        # (lowest band 58 C) indexes the table and the EC runs the fan off
-        # below its lowest band, since under the sensor 0 row (lowest band
-        # 34 C) a band would already match. Any non-zero reading, and any
-        # reading at 58 C or above, is consistent with both rows. The 2026-09-02
-        # run sat at 2000-2500 RPM in every mode with no temperature logged, so
-        # it settled nothing; that is why the temperature is logged now.
+        # Second reading after the hold. The first is taken a few seconds after
+        # the switch, before a fan can spin up from 0 or settle from the
+        # previous mode, so the pair shows early versus held. In Custom mode
+        # the held reading bears on the open table-mapping question (see
+        # CLAUDE.md), but only under three conditions, and the label below
+        # says so when they are not met: the safe curve was written this run
+        # (under -SkipSafeCurve the table in force is unknown); the hold was
+        # longer than the fan's roughly 30 s ramp (at the default 6 s the
+        # 2026-09-02 run read 2200 then 2100 RPM in Custom, still settling
+        # from Performance); and the temperature is beside the RPM. Then 0 RPM
+        # with sensor 3 between 34 and 58 C means the sensor 3 row (lowest
+        # band 58 C) indexes the table and the EC runs the fan off below its
+        # lowest band, since under the sensor 0 row (lowest band 34 C) a band
+        # would already match. Any non-zero reading, and any reading at 58 C
+        # or above, is consistent with both rows.
         $after = Get-FanReading
-        Write-ToolLog ("  fan 0: " + $after.rpm + " rpm, sensor 3: " + $after.temp + " C (" + (Get-SecondsSince $sinceSwitch) + " s after the switch; hold was at least " + $DwellSeconds + " s)")
+        $heldFor = Get-SecondsSince $sinceSwitch
+        $mappingNote = if ($SkipSafeCurve) { '; table in force unknown, no bearing on the table-mapping question' }
+                       elseif ($heldFor -lt 30) { '; shorter than the ~30 s ramp, no bearing on the table-mapping question' }
+                       else { '' }
+        Write-ToolLog ("  fan 0: " + $after.rpm + " rpm, sensor 3: " + $after.temp + " C (" + $heldFor + " s after the switch; hold was at least " + $DwellSeconds + " s" + $mappingNote + ")")
 
         $sweep += New-Object PSObject -Property ([ordered]@{
             requested = $mode; readBack = $readBack
