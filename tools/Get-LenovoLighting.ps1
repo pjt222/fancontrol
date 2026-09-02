@@ -294,10 +294,14 @@ try {
             } catch {
                 Write-ToolLog ("  Lighting_Id 4 re-read at the answer -> ERROR: " + $_.Exception.Message)
             }
-            if ("$state4AtAnswer" -ne "$state4") {
-                Write-ToolLog ("  WARNING: Lighting_Id 4 Current_State_Type was " + $state4 + " after the switch and " + $state4AtAnswer + " when the operator answered.")
-            } else {
-                Write-ToolLog ("  Lighting_Id 4 Current_State_Type at the answer: " + $state4AtAnswer + " (unchanged)")
+            # A failed re-read is already logged above; comparing its $null
+            # against the first reading would report a change that never was.
+            if ($null -ne $state4AtAnswer) {
+                if ("$state4AtAnswer" -ne "$state4") {
+                    Write-ToolLog ("  WARNING: Lighting_Id 4 Current_State_Type was " + $state4 + " after the switch and " + $state4AtAnswer + " when the operator answered.")
+                } else {
+                    Write-ToolLog ("  Lighting_Id 4 Current_State_Type at the answer: " + $state4AtAnswer + " (unchanged)")
+                }
             }
         }
 
