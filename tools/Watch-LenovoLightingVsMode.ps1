@@ -21,8 +21,15 @@ manipulations that reach the LED or the mode by other paths:
              that reads 2 on battery is a third outcome (the register moved
              without SetSmartFanMode); nothing changing is a null result.
   replug     AC adapter back in.
-  fnq        Fn+Q once: the EC hotkey path, which no run has sampled (the
-             sweeps went through WMI).
+  sleepwake  sleep and wake. The action happens before Enter: the operator
+             sleeps the machine, wakes it, signs in, then presses Enter, and
+             the window samples the first seconds after resume. Firmware that
+             restores an LED and a mode register on resume is a likely place
+             for the two to skew. Skipped in Custom: curve retention across
+             sleep is unmeasured (CLAUDE.md), and waking into Custom with a
+             lost table is the fans-off hazard.
+  fnq        Fn+Q once: the EC hotkey path. Sampled once on 2026-09-03: the
+             register and id 4 moved within the same sample, about a second.
   fnspace    Fn+Space once: the usual Lenovo keyboard-backlight binding, which
              on this machine changes the keyboard colour (operator's report,
              2026-09-03). Tests whether ids 0/1/2/3/5 report any lighting
@@ -67,8 +74,9 @@ is read-only, operator-driven and continuous, a different safety class, and it
 must not call SetSmartFanMode at all.
 
 .PARAMETER Phases
-Phase keys to run, in order. Default: baseline, unplug, replug, fnq, fnspace,
-vantage. With -IncludeFullSpeed, fullspeed is inserted before vantage.
+Phase keys to run, in order. Default: baseline, unplug, replug, sleepwake,
+fnq, fnspace, vantage. With -IncludeFullSpeed, fullspeed is inserted before
+vantage.
 
 .PARAMETER PhaseSeconds
 Sampling window per phase, except unplug and replug.
@@ -116,7 +124,7 @@ is owed after a run: no table and no mode is written.
 [CmdletBinding()]
 param(
     [string]$LogPath,
-    [string[]]$Phases = @('baseline', 'unplug', 'replug', 'fnq', 'fnspace', 'vantage'),
+    [string[]]$Phases = @('baseline', 'unplug', 'replug', 'sleepwake', 'fnq', 'fnspace', 'vantage'),
     [int]$PhaseSeconds = 20,
     [int]$UnplugSeconds = 30,
     [int]$MismatchTimeoutSeconds = 5,
@@ -503,6 +511,7 @@ $catalog = [ordered]@{
     baseline  = @{ title = 'control, no action';                       instruction = 'Do nothing.';                       seconds = $PhaseSeconds }
     unplug    = @{ title = 'AC adapter out, in Performance';           instruction = 'Unplug the AC adapter.';            seconds = $UnplugSeconds }
     replug    = @{ title = 'AC adapter back in';                       instruction = 'Plug the AC adapter back in.';      seconds = $UnplugSeconds }
+    sleepwake = @{ title = 'sleep and wake, sampling the first window after resume'; instruction = 'Put the machine to sleep, wake it and sign in.'; seconds = $PhaseSeconds; beforeEnter = $true }
     fnq       = @{ title = 'Fn+Q once (EC hotkey path)';               instruction = 'Press Fn+Q once.';                  seconds = $PhaseSeconds }
     fnspace   = @{ title = 'Fn+Space once (keyboard backlight)';       instruction = 'Press Fn+Space once.';              seconds = $PhaseSeconds }
     fullspeed = @{ title = 'Fan_Set_FullSpeed(1) for one window';      instruction = 'Do nothing; the tool enables full speed itself.'; seconds = $PhaseSeconds }
@@ -516,7 +525,7 @@ function Invoke-Phase {
         key = $Key; title = $spec.title; label = ''; skipped = $false; skipReason = ''
         modeAtStart = $null; modeAtEnd = $null; state4AtStart = $null; state4AtEnd = $null
         battAtStart = $null; battAtEnd = $null; changed = @(); battLabels = @()
-        counts = $null; colour = $null; vantageOffer = $null; note = ''; measuredNothing = $false
+        counts = $null; colour = $null; vantageOffer = $null; keyboardSeen = $null; note = ''; measuredNothing = $false
         unresolved = 0; resolvedLags = @(); mismatches = @()
     }
     Write-ToolLog ""
@@ -587,7 +596,20 @@ function Invoke-Phase {
         }
     }
 
-    [void](Read-Operator ("  Press Enter to start sampling, then, while it samples for " + $seconds + " s: " + $instruction))
+    if ($Key -eq 'sleepwake' -and "$modeNow" -eq '255') {
+        $record['skipped'] = $true; $record['skipReason'] = 'mode is Custom (255); curve retention across sleep is unmeasured, and waking into Custom with a lost table is the fans-off hazard'
+        Write-ToolLog ("  Phase skipped: " + $record['skipReason'])
+        return $record
+    }
+
+    # Most phases act inside the window. A phase marked beforeEnter acts
+    # first and samples from Enter, so the window sees the state right after
+    # the action rather than the action itself.
+    if ($spec.ContainsKey('beforeEnter') -and $spec.beforeEnter) {
+        [void](Read-Operator ("  Now: " + $instruction + " Press Enter AFTER that; sampling starts at Enter and runs " + $seconds + " s"))
+    } else {
+        [void](Read-Operator ("  Press Enter to start sampling, then, while it samples for " + $seconds + " s: " + $instruction))
+    }
 
     if ($Key -eq 'fullspeed') {
         $called = Set-FullSpeedThroughModule -On $true
@@ -647,6 +669,16 @@ function Invoke-Phase {
             $record['note'] = 'Win32_Battery reported only ' + ($win.battLabels -join '/') + ' during the window, so no AC transition fell inside it; this phase measured nothing about the adapter'
             Write-ToolLog ("  NOTE: " + $record['note'])
         }
+    }
+
+    if ($Key -eq 'fnspace') {
+        # Nothing objective confirms the keypress (the mode and the battery do
+        # for the other phases), so the log carries the operator's word on
+        # what the keyboard did beside the lighting class's silence.
+        $kb = Read-Operator ("  What did the keyboard backlight do (verbatim; Enter = not observed)")
+        $record['keyboardSeen'] = $kb
+        if ($kb.Length -eq 0) { Write-ToolLog "  operator, keyboard: not observed (empty answer)" }
+        else { Write-ToolLog ("  operator, keyboard: '" + $kb + "'") }
     }
 
     $obs = Read-ColourAtAnswer -Key $Key -SincePhase $phaseClock
@@ -808,6 +840,7 @@ if ($phaseRecords.Count -gt 0) {
                        "; colour: " + $colour)
         if ($r['note'].Length -gt 0) { Write-ToolLog ("      note: " + $r['note']) }
         if ($null -ne $r['vantageOffer']) { Write-ToolLog ("      Vantage offers: '" + $r['vantageOffer'] + "'") }
+        if ($null -ne $r['keyboardSeen']) { Write-ToolLog ("      keyboard (operator): '" + $r['keyboardSeen'] + "'") }
     }
     Write-ToolLog ""
     if ($expectTotal -eq 0) {
