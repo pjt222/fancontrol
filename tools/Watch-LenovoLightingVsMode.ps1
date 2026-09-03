@@ -531,10 +531,20 @@ function Invoke-Phase {
 
     if ($Key -eq 'unplug' -and "$modeNow" -ne '3') {
         Write-ToolLog ("  Mode reads " + $modeNow + "; the downgrade test needs Performance (3).")
-        [void](Read-Operator ("  Press Fn+Q until the OSD shows Performance, then press Enter"))
-        $modeNow = Get-Mode
-        $record['modeAtStart'] = $modeNow
-        Write-ToolLog ("  mode now: " + $modeNow)
+        $nudge = $true
+        if ("$modeNow" -eq '255') {
+            # The same gate the fnq phase applies: Fn+Q leaves Custom and this
+            # tool cannot put it back.
+            Write-ToolLog "  WARNING: the machine is in Custom (255). Fn+Q leaves it and cannot re-enter it; this tool cannot restore it (a set-curve can)."
+            $go = Read-Operator ("  Type yes to press Fn+Q anyway, anything else to run this phase in Custom")
+            if ($go -ne 'yes') { $nudge = $false }
+        }
+        if ($nudge) {
+            [void](Read-Operator ("  Press Fn+Q until the OSD shows Performance, then press Enter"))
+            $modeNow = Get-Mode
+            $record['modeAtStart'] = $modeNow
+            Write-ToolLog ("  mode now: " + $modeNow)
+        }
         if ("$modeNow" -ne '3') {
             $record['label'] = "run in mode " + $modeNow + "; the downgrade test needs 3"
             Write-ToolLog ("  Still " + $modeNow + ". Running the phase anyway, labelled: " + $record['label'])
@@ -716,7 +726,7 @@ try {
     Write-ToolLog ("SmartFanMode at start: " + $startMode + " (this tool never changes it; Fn+Q phases will)")
     if ($null -eq $startMode) { throw "cannot read SmartFanMode" }
     if ("$startMode" -eq '255') {
-        Write-ToolLog "WARNING: starting in Custom (255). The fnq phase leaves Custom and Fn+Q cannot re-enter it; this tool cannot restore it. The phase asks before pressing."
+        Write-ToolLog "WARNING: starting in Custom (255). Fn+Q leaves Custom and cannot re-enter it; this tool cannot restore it. The unplug and fnq phases ask before any Fn+Q."
     }
     Write-ToolLog "Initial sample:"
     $initial = Read-Sample
