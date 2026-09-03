@@ -649,7 +649,7 @@ try {
     }
     Write-ToolLog ("Phases: " + ($phaseList -join ', '))
     if (-not ($LightingIds -contains 4)) {
-        Write-ToolLog ("WARNING: -LightingIds does not include 4, the one id measured to track the mode; the verdict will rest on no reading.")
+        throw "-LightingIds must include 4, the one id measured to track the mode; without it no sample carries an expectation"
     }
 
     $gz = Get-LenovoWmiClass -ClassName 'LENOVO_GAMEZONE_DATA' -Single
@@ -769,7 +769,11 @@ if ($phaseRecords.Count -gt 0) {
         if ($null -ne $r['vantageOffer']) { Write-ToolLog ("      Vantage offers: '" + $r['vantageOffer'] + "'") }
     }
     Write-ToolLog ""
-    if ($unresolvedTotal -gt 0) {
+    if ($expectTotal -eq 0) {
+        # A run in which nothing readable happened must not print a pass.
+        $verdict = "NO VERDICT: no sample carried an expectation (agree, transient, sustained and inconclusive are all 0). Read the no-reading, no-mode and no-expectation counts per phase."
+        $result['ok'] = $false
+    } elseif ($unresolvedTotal -gt 0) {
         $verdict = "Lighting_Id 4 DISAGREED with SmartFanMode: " + $unresolvedTotal + " sustained episode(s) never agreed again within the window, in: " + ($unresolvedIn -join ', ') + ". Read those phases' sample lines; the WARNING lines carry the re-reads."
     } elseif ($sustainedTotal -gt 0) {
         $verdict = "No standing disagreement: " + $sustainedTotal + " sustained episode(s) all agreed again later at the same mode (after " + ($lagsAll -join ', ') + " s), across " + $expectTotal + " samples with an expectation and " + $manipulations.Count + " manipulations (" + ($manipulations -join ', ') + "). Consistent with a repaint lag beyond the " + $MismatchTimeoutSeconds + " s timeout; a standing divergence would not have agreed again without a mode change."
