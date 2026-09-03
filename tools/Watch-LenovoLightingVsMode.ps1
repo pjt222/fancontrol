@@ -492,7 +492,7 @@ function Invoke-Phase {
         key = $Key; title = $spec.title; label = ''; skipped = $false; skipReason = ''
         modeAtStart = $null; modeAtEnd = $null; state4AtStart = $null; state4AtEnd = $null
         battAtStart = $null; battAtEnd = $null; changed = @(); battLabels = @()
-        counts = $null; colour = $null; vantageOffer = $null; note = ''
+        counts = $null; colour = $null; vantageOffer = $null; note = ''; measuredNothing = $false
         unresolved = 0; resolvedLags = @(); mismatches = @()
     }
     Write-ToolLog ""
@@ -601,13 +601,19 @@ function Invoke-Phase {
         Write-ToolLog "  no field moved during the window."
     }
 
-    if ($Key -eq 'unplug' -and -not ($win.battLabels -contains 'battery')) {
-        $record['note'] = 'Win32_Battery never reported battery during the window; as far as Windows saw the adapter was not unplugged, so this phase measured nothing about the downgrade'
-        Write-ToolLog ("  NOTE: " + $record['note'])
-    }
-    if ($Key -eq 'replug' -and -not ($win.battLabels -contains 'AC')) {
-        $record['note'] = 'Win32_Battery never reported AC during the window; as far as Windows saw the adapter was not plugged back in'
-        Write-ToolLog ("  NOTE: " + $record['note'])
+    # The adapter phases measure a transition, which has to fall inside the
+    # window: Win32_Battery must report both AC and battery during it. A window
+    # that saw only one label measured nothing about the transition, whether
+    # the operator missed the cue or acted before sampling started, and the
+    # summary keeps such a phase out of the manipulation count.
+    if ($Key -eq 'unplug' -or $Key -eq 'replug') {
+        $sawAC = ($win.battLabels -contains 'AC')
+        $sawBattery = ($win.battLabels -contains 'battery')
+        if (-not ($sawAC -and $sawBattery)) {
+            $record['measuredNothing'] = $true
+            $record['note'] = 'Win32_Battery reported only ' + ($win.battLabels -join '/') + ' during the window, so no AC transition fell inside it; this phase measured nothing about the adapter'
+            Write-ToolLog ("  NOTE: " + $record['note'])
+        }
     }
 
     $obs = Read-ColourAtAnswer -Key $Key -SincePhase $phaseClock
@@ -754,10 +760,13 @@ if ($phaseRecords.Count -gt 0) {
             $offer = $r['vantageOffer']
             if ($null -eq $offer -or $offer.Length -eq 0 -or $offer -eq 'none') { $isControl = $true }
         }
-        if (-not $isControl) { $manipulations += $r['key'] }
+        # A phase whose note says it measured nothing (no AC transition fell in
+        # its window) is not a manipulation either; its samples still count.
+        if (-not $isControl -and -not $r['measuredNothing']) { $manipulations += $r['key'] }
         $colour = $(if ($null -eq $r['colour'] -or $r['colour'].Length -eq 0) { '(not observed)' } else { $r['colour'] })
         $moved = $(if ($r['changed'].Count -gt 0) { ($r['changed'] -join ', ') } else { 'none' })
         $label = $(if ($r['label'].Length -gt 0) { ' [' + $r['label'] + ']' } else { '' })
+        if ($r['measuredNothing']) { $label = $label + ' [measured nothing]' }
         $lagText = $(if (@($r['resolvedLags']).Count -gt 0) { '; sustained episodes that agreed again later: ' + (@($r['resolvedLags']) -join ', ') + ' s' } else { '' })
         Write-ToolLog ("  " + $r['key'] + $label + ": mode " + $r['modeAtStart'] + " -> " + $r['modeAtEnd'] +
                        ", id4 " + $r['state4AtStart'] + " -> " + $r['state4AtEnd'] +
