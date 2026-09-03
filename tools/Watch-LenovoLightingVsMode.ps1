@@ -36,10 +36,11 @@ manipulations that reach the LED or the mode by other paths:
              consecutive samples one second apart.
   fnspace    Fn+Space once: the usual Lenovo keyboard-backlight binding, which
              on this machine changes the keyboard colour (operator's report,
-             2026-09-03, the #44 comment above). Tests whether ids 0/1/2/3/5 report any lighting
-             live; on 2026-09-03 none moved while the keyboard colour did.
-             Id 0's descriptor row (quoted in CLAUDE.md) looks like a
-             multi-level zone, but nothing has measured what it is.
+             2026-09-03, the #44 comment above). Tests whether ids 0/1/2/3/5
+             report any lighting live; on 2026-09-03 none moved while the
+             keyboard colour did. Id 0's descriptor row (quoted in CLAUDE.md)
+             looks like a multi-level zone, but nothing has measured what it
+             is.
   fullspeed  only with -IncludeFullSpeed: Fan_Set_FullSpeed(1) for one window.
              The operator's colour there answers whether the LED changes under
              full speed, an indicator fact for #44 on its own. The window's
@@ -56,9 +57,10 @@ again, then Win32_Battery.BatteryStatus and Fan_Get_FullSpeed, and is stamped
 with stopwatch seconds since the window opened plus the sample's own duration.
 Win32_Battery is the adapter column. LENOVO_OTHER_METHOD.Get_AC_PD_Status was
 read once per phase in the 2026-09-03 13:53 run (recorded at
-https://github.com/pjt222/fancontrol/issues/44#issuecomment-5525618714)
-and returned AC_PD_Status = 0 throughout while the barrel adapter was in, which is not what an adapter
-indicator would show; it is not read any more.
+https://github.com/pjt222/fancontrol/issues/44#issuecomment-5525618714) and
+returned AC_PD_Status = 0 throughout; no adapter transition fell in that run,
+so a constant reading taught nothing about what it reports. It was read-only
+by its name alone and is not read any more.
 Sampling runs as fast as the calls return, targeting one sample per second;
 the label carries the measured time, not the target.
 
@@ -69,7 +71,7 @@ id 4 index differs is re-read about every 0.4 s until it agrees again or
 (a switch landed mid-sample, or the index repainted late); the mode moving
 during the re-reads makes it inconclusive; outlasting the timeout with the
 mode holding still makes it sustained. A sustained episode that agrees again
-later in the window at the same mode is reported as lag, and only a
+later in the window at the same mode is reported with its gap, and only a
 sustained episode that never agrees again counts as a disagreement in the
 verdict. A mode outside the table gives no expectation, not a disagreement.
 
@@ -96,11 +98,13 @@ verdict to mean anything.
 
 .PARAMETER MismatchTimeoutSeconds
 How long a disagreeing pair is re-read, about 0.4 s apart, before the episode
-counts as sustained. The only latency figure on record is that id 4 read the
-new index about a second after a WMI SetSmartFanMode (the 800 ms sleep before
-the read in Get-LenovoLighting.ps1); the hotkey path is unmeasured. A repaint
-slower than this timeout is logged as sustained and then as resolved when a
-later sample agrees at the same mode, which the summary reports as lag.
+counts as sustained. Two latency figures are on record, both about a second:
+id 4 read the new index about a second after a WMI SetSmartFanMode (the 800 ms
+sleep before the read in Get-LenovoLighting.ps1), and on the hotkey path the
+register and the index moved between two consecutive samples one second apart
+(2026-09-03, the #44 comment above). A repaint slower than this timeout is
+logged as sustained and then as agreed-again when a later sample agrees at
+the same mode; the summary states the gap rather than calling it lag.
 
 .PARAMETER IncludeFullSpeed
 Add the fullspeed phase. This is the only write the tool can make. It goes
@@ -123,8 +127,15 @@ Requires elevation. Attended: the prompts block, and a host that cannot prompt
 stops the run. Ctrl+C at a prompt has not been measured to reach the finally
 block in this tool; without -IncludeFullSpeed there is nothing for the finally
 to undo. Fn+Q cannot enter Custom (255): if the run starts in Custom, the fnq
-phase leaves it and this tool cannot put it back (a set-curve can). Nothing
-is owed after a run: no table and no mode is written.
+phase leaves it and this tool cannot put it back (a set-curve can). The tool
+itself owes nothing after a run: it writes no table and selects no mode. Two
+things it reports rather than fixes. Full speed left on, either because the
+disable did not read back False or because the mode read Custom at that point
+and the operator did not leave it, which is the safe outcome; the closing
+lines say what to run. And a machine in Custom at the end, which runs
+whatever table the EC holds; neither this tool nor Fn+Q can enter Custom, so
+that takes Vantage or another process, and the closing lines point at
+Reset-LenovoFanState.ps1.
 #>
 [CmdletBinding()]
 param(
@@ -291,8 +302,10 @@ function Get-LastResumeTime {
     # Newest resume event in the System log, so the sleepwake phase has an
     # objective check that a suspend happened: Microsoft-Windows-Power-
     # Troubleshooter id 1 (return from S3/S4) or Microsoft-Windows-Kernel-
-    # Power id 507 (exit from modern standby). Which of the two this machine
-    # logs on a sleep is unmeasured; the phase note names the one it found.
+    # Power id 507 (exit from modern standby). When the query was first tried
+    # from WSL on 2026-09-03 the newest event was a Kernel-Power 507 at
+    # 13:03:04 that day, so this machine logs modern-standby exits; the phase
+    # note names the one it finds.
     # Elevated processes can read the System log. $null time when neither
     # query returns an event.
     $newest = $null; $source = $null
@@ -1048,7 +1061,7 @@ if ($phaseRecords.Count -gt 0) {
 
 Write-ToolLog ""
 if ($script:FullSpeedCalled) {
-    Write-ToolLog ("OWED: full speed may still be on (see the ERROR above). Change the power mode first if in Custom, then: fancontrol.exe set 0 0")
+    Write-ToolLog ("OWED: full speed may still be on (see the lines above). Change the power mode first if in Custom, then: fancontrol.exe set 0 0")
 } else {
     Write-ToolLog "Nothing owed by this run: it wrote no table and selected no mode."
 }
