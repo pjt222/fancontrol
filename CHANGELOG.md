@@ -114,11 +114,14 @@ when the change landed on `main`.
 
   The indicator reads `LENOVO_LIGHTING_METHOD.Get_Lighting_Current_Status(4)`
   and maps the state index to the colour measured for it on 2026-09-02
-  (0 blue, 1 white, 2 red, 3 multi). When the read fails it falls back to the
-  colour derived from SmartFanMode and says so. The read is the source
-  because the two differ: with Performance selected and the AC adapter out,
-  the register keeps reading 3 while the index reads 1 and the button is
-  white (measured 2026-09-03, #44). The GUI header now also shows the
+  (0 blue, 1 white, 2 red, 3 multi). When the read returns nothing it falls
+  back to the colour derived from SmartFanMode and says so; an index outside
+  the measured four shows as unknown rather than painting the mode's colour.
+  The read is the source because the two differ: with Performance selected
+  and the barrel adapter out, the register keeps reading 3 while the index
+  reads 1 and the button is white, on battery and on USB-C dock power alike
+  (measured 2026-09-03, #44). Mode and index are read in one PowerShell call
+  so the pair is from the same instant. The GUI header now also shows the
   SmartFanMode. The lighting class is only ever read; a test fails the build
   on any call to its setter.
 
@@ -126,9 +129,10 @@ when the change landed on `main`.
   persistence to `fancontrol.json`.
 - TUI dashboard (ratatui) with an interactive curve editor.
 - GUI (egui/eframe) with per-fan sliders and EC fan-curve display. *(Corrected
-  2026-09-02: this line claimed a SmartFanMode display; `src/gui.rs` has none.
-  The mode display and curve editor exist only on the unmerged
-  `phase-4-5-config-gui-curves` branch. #44 tracks the mode display.)*
+  2026-09-02: this line claimed a SmartFanMode display that `src/gui.rs` did
+  not have then. The mode display landed with the LED indicator on 2026-09-03,
+  see the entry above; the curve editor still exists only on the unmerged
+  `phase-4-5-config-gui-curves` branch.)*
 - `tools/` for reusable Windows tooling, built on `tools/LenovoWmi.psm1`.
 
 ### Fixed
