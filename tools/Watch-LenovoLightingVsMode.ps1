@@ -212,15 +212,19 @@ function Get-ColourClass {
     # Loose word match on the operator's text, so the summary can put it
     # beside the colour measured for the mode. The verbatim text is logged
     # regardless. $null for an empty answer; 'unclassified' for text naming
-    # none of the known words. Two of blue/white/red named together, or
-    # "three", "multi", "all", "purple" or "pink" (red and blue lit together),
-    # read as multi.
+    # none of the known words, which is the answer to read most carefully.
+    # Two of blue/white/red named together, or the words "three", "multi" or
+    # "all", read as multi, the class the operator's "all thre (at least red
+    # and blue)" for Custom belongs to. "purple" and "pink" also read as
+    # multi: that is an interpretation (red and blue lit together), not part
+    # of the 2026-09-02 measurement, and the comparison says so when it rests
+    # on it.
     param([AllowNull()][string]$Text)
     if ($null -eq $Text -or $Text.Trim().Length -eq 0) { return $null }
     $t = $Text.ToLowerInvariant()
     $named = @()
     foreach ($w in @('blue', 'white', 'red')) { if ($t.Contains($w)) { $named += $w } }
-    if ($t.Contains('three') -or $t.Contains('multi') -or $t.Contains('all ') -or $t.Contains('purple') -or $t.Contains('pink') -or $named.Count -ge 2) { return 'multi' }
+    if ($t.Contains('three') -or $t.Contains('multi') -or ($t -match '\ball\b') -or $t.Contains('purple') -or $t.Contains('pink') -or $named.Count -ge 2) { return 'multi' }
     if ($named.Count -eq 1) { return $named[0] }
     if ($t.Contains('off') -or $t.Contains('dark') -or $t.Contains('none')) { return 'off' }
     return 'unclassified'
@@ -281,6 +285,30 @@ function Get-BatteryRaw {
 function Get-FullSpeed {
     if ($null -eq $fm) { return $null }
     try { return (Get-WmiPropertyOrNull -InputObject ($fm.Fan_Get_FullSpeed()) -Name 'Status') } catch { return $null }
+}
+
+function Get-LastResumeTime {
+    # Newest resume event in the System log, so the sleepwake phase has an
+    # objective check that a suspend happened: Microsoft-Windows-Power-
+    # Troubleshooter id 1 (return from S3/S4) or Microsoft-Windows-Kernel-
+    # Power id 507 (exit from modern standby). Which of the two this machine
+    # logs on a sleep is unmeasured; the phase note names the one it found.
+    # Elevated processes can read the System log. $null time when neither
+    # query returns an event.
+    $newest = $null; $source = $null
+    foreach ($q in @(@{ ProviderName = 'Microsoft-Windows-Power-Troubleshooter'; Id = 1 }, @{ ProviderName = 'Microsoft-Windows-Kernel-Power'; Id = 507 })) {
+        try {
+            $ev = Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = $q.ProviderName; Id = $q.Id } -MaxEvents 1 -ErrorAction Stop
+            if ($null -ne $ev) {
+                $tc = $ev.TimeCreated
+                if ($null -eq $newest -or $tc -gt $newest) { $newest = $tc; $source = ($q.ProviderName + ' id ' + $q.Id) }
+            }
+        } catch {
+            # "No events were found" is the usual reason and is not an error
+            # of the run; the caller reports a null as "could not confirm".
+        }
+    }
+    return @{ time = $newest; source = $source }
 }
 
 function Read-Sample {
@@ -504,18 +532,25 @@ function Read-ColourAtAnswer {
     # The verdict compares id 4 with the register. A button that changes while
     # both hold still is a third shape, visible only here: the operator's
     # colour against the colour measured for the mode at the answer.
+    # Five outcomes, kept apart: not observed (empty answer), unclassified
+    # (text naming no known colour), no expectation (the mode could not be
+    # read at the answer), matches, DIFFERS.
     $class = Get-ColourClass $answer
     $expected = Get-ExpectedColour $m
     $match = 'not observed'
     if ($null -ne $class) {
-        if ($class -eq 'unclassified' -or $null -eq $expected) { $match = 'unclassified' }
+        if ($class -eq 'unclassified') { $match = 'unclassified' }
+        elseif ($null -eq $expected) { $match = 'no expectation' }
         elseif ($class -eq $expected) { $match = 'matches' }
         else { $match = 'DIFFERS' }
     }
-    if ($match -eq 'DIFFERS') {
-        Write-ToolLog ("  WARNING: the colour reads as " + $class + ", but mode " + $m + " measured " + $expected + " on 2026-09-02: the button moved without the register, or the report needs a second look")
-    } elseif ($null -ne $class) {
-        Write-ToolLog ("  colour reads as " + $class + "; mode " + $m + " measured " + $expected + " on 2026-09-02: " + $match)
+    $interpreted = ($class -eq 'multi' -and (($answer.ToLowerInvariant().Contains('purple')) -or ($answer.ToLowerInvariant().Contains('pink'))))
+    $interpNote = $(if ($interpreted) { ' (purple/pink read as multi is an interpretation, not the measured word)' } else { '' })
+    switch ($match) {
+        'DIFFERS'      { Write-ToolLog ("  WARNING: the colour reads as " + $class + ", but mode " + $m + " measured " + $expected + " on 2026-09-02: the button moved without the register, or the report needs a second look" + $interpNote) }
+        'unclassified' { Write-ToolLog ("  WARNING: the answer names none of blue / white / red / all three / off. If the button showed a colour outside the measured set that is the strongest single finding this run can produce; read the verbatim text above.") }
+        'no expectation' { Write-ToolLog ("  colour reads as " + $class + "; the mode could not be read at the answer, so there is nothing to compare it with") }
+        'matches'      { Write-ToolLog ("  colour reads as " + $class + "; mode " + $m + " measured " + $expected + " on 2026-09-02: matches" + $interpNote) }
     }
     return @{ colour = $answer; mode = $m; state4 = $s; colourClass = $class; colourExpected = $expected; colourMatch = $match }
 }
@@ -690,11 +725,13 @@ function Invoke-Phase {
     # Most phases act inside the window. A phase marked beforeEnter acts
     # first and samples from Enter, so the window sees the state right after
     # the action rather than the action itself.
+    $phaseStartedAt = Get-Date
     if ($spec.ContainsKey('beforeEnter') -and $spec.beforeEnter) {
         [void](Read-Operator ("  Now: " + $instruction + " Press Enter AFTER that; sampling starts at Enter and runs " + $seconds + " s"))
     } else {
         [void](Read-Operator ("  Press Enter to start sampling, then, while it samples for " + $seconds + " s: " + $instruction))
     }
+    $windowOpenedAt = Get-Date
 
     if ($Key -eq 'fullspeed') {
         $called = Set-FullSpeedThroughModule -On $true
@@ -753,6 +790,25 @@ function Invoke-Phase {
             $record['measuredNothing'] = $true
             $record['note'] = 'Win32_Battery reported only ' + ($win.battLabels -join '/') + ' during the window, so no AC transition fell inside it; this phase measured nothing about the adapter'
             Write-ToolLog ("  NOTE: " + $record['note'])
+        }
+    }
+
+    # The suspend has an objective trace: the newest resume event in the
+    # System log. Older than the phase start means no sleep fell in this
+    # phase; unreadable means the row stays on the operator's word.
+    if ($Key -eq 'sleepwake') {
+        $resume = Get-LastResumeTime
+        if ($null -eq $resume.time) {
+            $record['note'] = 'no resume event could be read from the System log (Power-Troubleshooter 1, Kernel-Power 507), so whether a sleep happened rests on the operator'
+            Write-ToolLog ("  NOTE: " + $record['note'])
+        } elseif ($resume.time -lt $phaseStartedAt) {
+            $record['measuredNothing'] = $true
+            $record['note'] = 'the newest resume event (' + $resume.source + ', ' + $resume.time.ToString('HH:mm:ss') + ') predates the phase start (' + $phaseStartedAt.ToString('HH:mm:ss') + '), so no sleep fell in this phase'
+            Write-ToolLog ("  NOTE: " + $record['note'])
+        } else {
+            $gap = [Math]::Round(($windowOpenedAt - $resume.time).TotalSeconds, 1)
+            $record['label'] = 'resume confirmed by ' + $resume.source + ' at ' + $resume.time.ToString('HH:mm:ss') + ', ' + $gap + ' s before the window opened'
+            Write-ToolLog ("  " + $record['label'])
         }
     }
 
@@ -900,7 +956,7 @@ if ($phaseRecords.Count -gt 0) {
     $lagsAll = @()
     $manipulations = @()
     $unresolvedIn = @()
-    $colourMatches = 0; $colourOther = 0; $colourDiffers = @()
+    $colourMatches = 0; $colourOther = 0; $colourDiffers = @(); $colourUnclassified = @()
     foreach ($r in $phaseRecords) {
         if ($r['skipped']) {
             Write-ToolLog ("  " + $r['key'] + ": skipped (" + $r['skipReason'] + ")")
@@ -929,9 +985,10 @@ if ($phaseRecords.Count -gt 0) {
             $colour = $colour + " (reads as " + $r['colourClass'] + "; mode " + $r['modeAtEnd'] + " measured " + $r['colourExpected'] + ": " + $r['colourMatch'] + ")"
         }
         switch ($r['colourMatch']) {
-            'matches' { $colourMatches++ }
-            'DIFFERS' { $colourDiffers += $r['key'] }
-            default   { $colourOther++ }
+            'matches'      { $colourMatches++ }
+            'DIFFERS'      { $colourDiffers += $r['key'] }
+            'unclassified' { $colourUnclassified += $r['key'] }
+            default        { $colourOther++ }
         }
         $moved = $(if ($r['changed'].Count -gt 0) { ($r['changed'] -join ', ') } else { 'none' })
         $label = $(if ($r['label'].Length -gt 0) { ' [' + $r['label'] + ']' } else { '' })
@@ -955,7 +1012,10 @@ if ($phaseRecords.Count -gt 0) {
     } elseif ($unresolvedTotal -gt 0) {
         $verdict = "Lighting_Id 4 DISAGREED with SmartFanMode: " + $unresolvedTotal + " sustained episode(s) never agreed again within the window, in: " + ($unresolvedIn -join ', ') + ". Read those phases' sample lines; the WARNING lines carry the re-reads."
     } elseif ($sustainedTotal -gt 0) {
-        $verdict = "No standing disagreement: " + $sustainedTotal + " sustained episode(s) all agreed again later at the same mode (after " + ($lagsAll -join ', ') + " s), across " + $expectTotal + " samples with an expectation and " + $manipulations.Count + " manipulations (" + ($manipulations -join ', ') + "). Consistent with a repaint lag beyond the " + $MismatchTimeoutSeconds + " s timeout; a standing divergence would not have agreed again without a mode change."
+        # Say how late the agreement came rather than calling any gap "lag":
+        # a repaint that slow is unmeasured, and the row prints each gap.
+        $maxGap = (@($lagsAll) | Measure-Object -Maximum).Maximum
+        $verdict = "No standing disagreement: " + $sustainedTotal + " sustained episode(s) agreed again later at the same mode, after " + ($lagsAll -join ', ') + " s (largest gap " + $maxGap + " s), across " + $expectTotal + " samples with an expectation and " + $manipulations.Count + " manipulations (" + ($manipulations -join ', ') + "). A standing divergence would not have agreed again without a mode change; whether a repaint can take that long is unmeasured, so read the rows."
     } else {
         $verdict = "Lighting_Id 4 did not disagree with SmartFanMode across " + $expectTotal + " samples with an expectation (" + $transientTotal + " transient mismatches that agreed on re-read, " + $inconclusiveTotal + " inconclusive) and " + $manipulations.Count + " manipulations (" + ($manipulations -join ', ') + ")."
     }
@@ -965,11 +1025,16 @@ if ($phaseRecords.Count -gt 0) {
     # separate line, because a button that moves while both hold still
     # would leave the verdict untouched and matter to #44 all the same.
     Write-ToolLog ("Operator colour against the colour measured for the mode at the answer: " + $colourMatches + " match, " + $colourDiffers.Count + " differ" +
-                   $(if ($colourDiffers.Count -gt 0) { " (" + ($colourDiffers -join ', ') + ")" } else { "" }) + ", " + $colourOther + " unclassified or not observed.")
+                   $(if ($colourDiffers.Count -gt 0) { " (" + ($colourDiffers -join ', ') + ")" } else { "" }) + ", " + $colourUnclassified.Count + " unclassified" +
+                   $(if ($colourUnclassified.Count -gt 0) { " (" + ($colourUnclassified -join ', ') + ")" } else { "" }) + ", " + $colourOther + " not observed or without an expectation.")
     if ($colourDiffers.Count -gt 0) {
         Write-ToolLog ("WARNING: in the phases listed the button did not show the colour measured for the register's mode. The verdict above does not cover that; read those rows.")
     }
+    if ($colourUnclassified.Count -gt 0) {
+        Write-ToolLog ("WARNING: in the phases listed the operator named a colour outside the measured set, or none. Read the verbatim text; a colour outside blue / white / red / multi would be the run's strongest single finding.")
+    }
     $result['colourDiffers'] = $colourDiffers
+    $result['colourUnclassified'] = $colourUnclassified
     $result['verdict'] = $verdict
     $result['sustained'] = $sustainedTotal
     $result['unresolved'] = $unresolvedTotal
