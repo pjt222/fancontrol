@@ -20,7 +20,7 @@ use simplelog::{ConfigBuilder, LevelFilter, WriteLogger};
 
 use cli::{Cli, Commands};
 use fan::CustomFanCurve;
-use led::{LedIndicator, LedSource, POWER_BUTTON_LIGHTING_ID};
+use led::{LedIndicator, POWER_BUTTON_LIGHTING_ID};
 use platform::{create_controller, FanController};
 
 // put id:"cli_parse", label:"Parse CLI Arguments", output:"cli_command.internal"
@@ -91,36 +91,16 @@ fn main() -> Result<()> {
 
 /// Show the power-button LED colour and where the knowledge came from.
 ///
-/// A failed mode read is reported and treated as unreadable rather than
-/// aborting, so the lighting read still prints; the indicator labels the
-/// result accordingly. The lighting read itself never errors (see
-/// `FanController::get_lighting_state`).
+/// Mode and lighting are read as one pair (one PowerShell process on Lenovo),
+/// so the two values are from the same instant. A value that could not be
+/// read arrives as `None` inside `Ok`, and the indicator labels the result
+/// accordingly; only a failure to run the read at all is an error.
 fn cmd_led(controller: &dyn FanController, json_output: bool) -> Result<()> {
-    let mode = match controller.get_smart_fan_mode() {
-        Ok(mode) => mode,
-        Err(e) => {
-            eprintln!("warning: SmartFanMode not readable: {e}");
-            None
-        }
-    };
-    let state_index = controller.get_lighting_state(POWER_BUTTON_LIGHTING_ID)?;
-    let led = LedIndicator::resolve(state_index, mode);
+    let pair = controller.get_mode_and_lighting(POWER_BUTTON_LIGHTING_ID)?;
+    let led = LedIndicator::resolve(pair.lighting_state, pair.smart_fan_mode);
 
     if json_output {
-        let source = match led.source {
-            LedSource::Read => "read",
-            LedSource::DerivedFromMode => "derived_from_mode",
-        };
-        println!(
-            "{}",
-            json!({
-                "lighting_id": POWER_BUTTON_LIGHTING_ID,
-                "state_index": led.state_index,
-                "smart_fan_mode": led.mode,
-                "colour": led.colour.map(|c| c.label()),
-                "source": source,
-            })
-        );
+        println!("{}", led.to_json());
         return Ok(());
     }
 

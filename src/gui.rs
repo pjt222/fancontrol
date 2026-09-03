@@ -38,31 +38,26 @@ enum WorkerResponse {
         fan_id: String,
         pwm: u8,
     },
-    /// SmartFanMode as read from the EC, each poll.
-    SmartFanMode(Option<u32>),
-    /// `Lighting_Id 4 -> Current_State_Type`, read beside the mode each poll.
-    Lighting(Option<u32>),
+    /// SmartFanMode and `Lighting_Id 4 -> Current_State_Type`, read together
+    /// each poll and applied together, so the header never shows a mode from
+    /// one instant beside an index from another.
+    ModeAndLighting(crate::platform::ModeAndLighting),
     Error(String),
 }
 
-/// Read the mode and the power-button lighting state and send both. Called
-/// after each discovery: both move without this process (Fn+Q, Vantage, and
-/// on battery the button changes while the register does not).
+/// Read the mode and the power-button lighting state as one pair and send it.
+/// Called after each discovery: both move without this process (Fn+Q,
+/// Vantage, and without the barrel adapter the button changes while the
+/// register does not).
 fn send_mode_and_lighting(
     controller: &dyn FanController,
     response_tx: &mpsc::Sender<WorkerResponse>,
 ) {
-    match controller.get_smart_fan_mode() {
-        Ok(mode) => {
-            let _ = response_tx.send(WorkerResponse::SmartFanMode(mode));
+    match controller.get_mode_and_lighting(POWER_BUTTON_LIGHTING_ID) {
+        Ok(pair) => {
+            let _ = response_tx.send(WorkerResponse::ModeAndLighting(pair));
         }
-        Err(e) => debug!("SmartFanMode not readable: {e}"),
-    }
-    match controller.get_lighting_state(POWER_BUTTON_LIGHTING_ID) {
-        Ok(index) => {
-            let _ = response_tx.send(WorkerResponse::Lighting(index));
-        }
-        Err(e) => debug!("lighting state not readable: {e}"),
+        Err(e) => debug!("mode and lighting not readable: {e}"),
     }
 }
 
@@ -222,11 +217,9 @@ impl FanControlApp {
                 WorkerResponse::CurveData(curves) => {
                     self.fan_curves = curves;
                 }
-                WorkerResponse::SmartFanMode(mode) => {
-                    self.smart_fan_mode = mode;
-                }
-                WorkerResponse::Lighting(index) => {
-                    self.lighting_index = index;
+                WorkerResponse::ModeAndLighting(pair) => {
+                    self.smart_fan_mode = pair.smart_fan_mode;
+                    self.lighting_index = pair.lighting_state;
                 }
                 WorkerResponse::PwmSet { fan_id, pwm } => {
                     self.status_message = format!("Set {} PWM to {}", fan_id, pwm);

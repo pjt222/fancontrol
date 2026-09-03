@@ -20,16 +20,19 @@
 //! adapter pulled, `GetSmartFanMode` kept reading 3 while id 4 read 1 and the
 //! operator saw the button white; on replug id 4 read 2 again and the button
 //! was red. The same happened at 16:50 with a USB-C dock powering the machine
-//! (Windows reporting external power), so the button keys on the barrel
-//! adapter, not on external power. The register reports the *selected* mode
-//! and id 4 the mode the button *shows*. The indicator therefore reads id 4 and falls back to the
-//! register only when the read fails, labelling the fallback as derived.
+//! (Windows reporting external power; comment 5527617570), so the button keys
+//! on the barrel adapter, not on external power. The register reports the
+//! *selected* mode and id 4 the mode the button *shows*. The indicator
+//! therefore reads id 4 and falls back to the register only when the read
+//! returns nothing, labelling the fallback as derived.
 //!
 //! What is not measured, and what the labels must not claim: which physical
 //! LED id 4 describes (its index matched the operator's colour in every
-//! observed state, across the mode and the adapter, which is a correlation, not
-//! an identification), whether fans and power limits follow the button on
-//! battery, and what any index other than 0 to 3 means.
+//! observed state, across the mode and the power source, which is a
+//! correlation, not an identification), whether fans and power limits follow
+//! the button without the barrel, and what any index other than 0 to 3 means.
+
+use serde_json::{json, Value};
 
 use crate::fan::smart_fan_mode;
 
@@ -54,7 +57,7 @@ pub enum LedColour {
 
 impl LedColour {
     /// Colour for a `Lighting_Id 4 -> Current_State_Type` index. Measured
-    /// 2026-09-02 15:27 by composition through the mode, and once more on
+    /// 2026-09-02 15:27 by composition through the mode, and again on
     /// 2026-09-03 when index 1 and `white` appeared together with the register
     /// at 3. Indices outside 0 to 3 have never been read and map to `None`.
     pub fn from_state_index(index: u32) -> Option<Self> {
@@ -104,15 +107,35 @@ impl LedColour {
     }
 }
 
-/// Where the indicator's colour came from.
+/// Where the indicator's colour came from, or why there is none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LedSource {
     /// `Lighting_Id 4` was read and its index is one of the four measured.
     Read,
-    /// The read failed or returned an unmeasured index; the colour is the one
-    /// measured for the SmartFanMode with the barrel adapter in, which is wrong
-    /// without it (battery or USB-C dock power) with Performance selected.
+    /// The lighting read returned nothing; the colour is the one measured for
+    /// the SmartFanMode with the barrel adapter in, which is wrong without it
+    /// (battery or USB-C dock power) with Performance selected.
     DerivedFromMode,
+    /// The lighting read returned an index outside the four measured. No
+    /// colour is painted: the device is in a state the tables do not cover,
+    /// and in the one measured disagreement the index was right and the
+    /// register wrong, so the register's colour is the weaker guess exactly
+    /// here. The index itself is shown.
+    UnmeasuredIndex,
+    /// Neither a lighting index nor a known mode was read: nothing to show.
+    Unavailable,
+}
+
+impl LedSource {
+    /// Stable machine-readable name, used in the `led --json` output.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::DerivedFromMode => "derived_from_mode",
+            Self::UnmeasuredIndex => "unmeasured_index",
+            Self::Unavailable => "unavailable",
+        }
+    }
 }
 
 /// The resolved indicator: a colour, its source, and the raw readings so the
@@ -128,21 +151,24 @@ pub struct LedIndicator {
 }
 
 impl LedIndicator {
-    /// Resolve from the two readings. The read index wins when it is one of
-    /// the four measured; otherwise the mode's colour is used and labelled
-    /// derived; with neither, `colour` is `None`.
+    /// Resolve from the two readings. A measured index wins. An index outside
+    /// the measured four gives no colour and says so. With no index at all,
+    /// a known mode gives the barrel-in colour labelled derived; with neither,
+    /// nothing.
     pub fn resolve(state_index: Option<u32>, mode: Option<u32>) -> Self {
-        if let Some(colour) = state_index.and_then(LedColour::from_state_index) {
-            return Self {
-                colour: Some(colour),
-                source: LedSource::Read,
-                state_index,
-                mode,
-            };
-        }
+        let (colour, source) = match state_index {
+            Some(index) => match LedColour::from_state_index(index) {
+                Some(colour) => (Some(colour), LedSource::Read),
+                None => (None, LedSource::UnmeasuredIndex),
+            },
+            None => match mode.and_then(LedColour::from_smart_fan_mode) {
+                Some(colour) => (Some(colour), LedSource::DerivedFromMode),
+                None => (None, LedSource::Unavailable),
+            },
+        };
         Self {
-            colour: mode.and_then(LedColour::from_smart_fan_mode),
-            source: LedSource::DerivedFromMode,
+            colour,
+            source,
             state_index,
             mode,
         }
@@ -151,25 +177,18 @@ impl LedIndicator {
     /// Short label for a title bar: `white`, `white (derived)`, `unknown
     /// (index 7)`, or `N/A` when nothing was readable.
     pub fn short_label(&self) -> String {
-        match (self.colour, self.source, self.state_index) {
-            (Some(colour), LedSource::Read, _) => colour.label().to_string(),
-            (Some(colour), LedSource::DerivedFromMode, Some(index)) => {
-                format!("{} (derived; index {index} unmeasured)", colour.label())
-            }
-            (Some(colour), LedSource::DerivedFromMode, None) => {
+        match (self.source, self.colour, self.state_index) {
+            (LedSource::Read, Some(colour), _) => colour.label().to_string(),
+            (LedSource::DerivedFromMode, Some(colour), _) => {
                 format!("{} (derived)", colour.label())
             }
-            (None, _, Some(index)) => format!("unknown (index {index})"),
-            (None, _, None) => "N/A".to_string(),
+            (LedSource::UnmeasuredIndex, _, Some(index)) => format!("unknown (index {index})"),
+            _ => "N/A".to_string(),
         }
     }
 
     /// One sentence for a CLI or a log line, naming the source honestly.
     pub fn describe(&self) -> String {
-        let index_text = match self.state_index {
-            Some(index) => format!("Lighting_Id {POWER_BUTTON_LIGHTING_ID} index {index}"),
-            None => format!("Lighting_Id {POWER_BUTTON_LIGHTING_ID} not readable"),
-        };
         let mode_text = match self.mode {
             Some(mode) => format!(
                 "SmartFanMode {mode} ({})",
@@ -177,17 +196,36 @@ impl LedIndicator {
             ),
             None => "SmartFanMode not readable".to_string(),
         };
-        match (self.colour, self.source) {
-            (Some(colour), LedSource::Read) => format!(
+        let index_text = match self.state_index {
+            Some(index) => format!("Lighting_Id {POWER_BUTTON_LIGHTING_ID} index {index}"),
+            None => format!("Lighting_Id {POWER_BUTTON_LIGHTING_ID} not readable"),
+        };
+        match (self.source, self.colour) {
+            (LedSource::Read, Some(colour)) => format!(
                 "button colour {} (read: {index_text}); {mode_text}",
                 colour.label()
             ),
-            (Some(colour), LedSource::DerivedFromMode) => format!(
+            (LedSource::DerivedFromMode, Some(colour)) => format!(
                 "button colour {} (derived from the mode; {index_text}); {mode_text}",
                 colour.label()
             ),
-            (None, _) => format!("button colour unknown ({index_text}); {mode_text}"),
+            (LedSource::UnmeasuredIndex, _) => format!(
+                "button colour unknown ({index_text} is outside the measured 0 to 3); {mode_text}"
+            ),
+            _ => format!("button colour unknown ({index_text}); {mode_text}"),
         }
+    }
+
+    /// The `led --json` document. Keys are emitted in alphabetical order by
+    /// `serde_json` (no `preserve_order`), and a test pins the exact line.
+    pub fn to_json(self) -> Value {
+        json!({
+            "colour": self.colour.map(LedColour::label),
+            "lighting_id": POWER_BUTTON_LIGHTING_ID,
+            "smart_fan_mode": self.mode,
+            "source": self.source.key(),
+            "state_index": self.state_index,
+        })
     }
 }
 
@@ -216,8 +254,8 @@ mod tests {
     }
 
     #[test]
-    fn the_two_tables_agree_on_ac_power() {
-        // Index i was read in the mode at position i of this list, on AC.
+    fn the_two_tables_agree_with_the_barrel_adapter_in() {
+        // Index i was read in the mode at position i of this list, barrel in.
         for (index, mode) in [(0, 1), (1, 2), (2, 3), (3, 255)] {
             assert_eq!(
                 LedColour::from_state_index(index),
@@ -228,8 +266,8 @@ mod tests {
 
     #[test]
     fn a_read_index_wins_over_the_mode() {
-        // The battery case, measured 2026-09-03 15:07: register 3, index 1,
-        // button white. The indicator must say white, not red.
+        // The barrel-out case, measured 2026-09-03 15:07 and 16:50: register
+        // 3, index 1, button white. The indicator must say white, not red.
         let led = LedIndicator::resolve(Some(1), Some(3));
         assert_eq!(led.colour, Some(LedColour::White));
         assert_eq!(led.source, LedSource::Read);
@@ -245,27 +283,33 @@ mod tests {
     }
 
     #[test]
-    fn an_unmeasured_index_falls_back_but_stays_visible() {
+    fn an_unmeasured_index_paints_no_colour_and_shows_the_index() {
         let led = LedIndicator::resolve(Some(7), Some(2));
-        assert_eq!(led.colour, Some(LedColour::White));
-        assert_eq!(led.source, LedSource::DerivedFromMode);
-        assert_eq!(led.state_index, Some(7));
-        assert_eq!(led.short_label(), "white (derived; index 7 unmeasured)");
-    }
-
-    #[test]
-    fn an_unmeasured_index_with_no_mode_is_unknown_not_a_colour() {
-        let led = LedIndicator::resolve(Some(7), None);
         assert_eq!(led.colour, None);
+        assert_eq!(led.source, LedSource::UnmeasuredIndex);
+        assert_eq!(led.state_index, Some(7));
         assert_eq!(led.short_label(), "unknown (index 7)");
+        assert!(led
+            .describe()
+            .contains("index 7 is outside the measured 0 to 3"));
+        assert!(led.describe().contains("SmartFanMode 2 (Balanced)"));
     }
 
     #[test]
-    fn nothing_readable_is_not_available() {
+    fn nothing_readable_is_unavailable_not_derived() {
         let led = LedIndicator::resolve(None, None);
         assert_eq!(led.colour, None);
+        assert_eq!(led.source, LedSource::Unavailable);
         assert_eq!(led.short_label(), "N/A");
         assert!(led.describe().contains("not readable"));
+    }
+
+    #[test]
+    fn an_unknown_mode_without_an_index_is_unavailable() {
+        let led = LedIndicator::resolve(None, Some(7));
+        assert_eq!(led.colour, None);
+        assert_eq!(led.source, LedSource::Unavailable);
+        assert_eq!(led.short_label(), "N/A");
     }
 
     #[test]
@@ -279,6 +323,31 @@ mod tests {
         assert!(derived
             .describe()
             .starts_with("button colour blue (derived from the mode; Lighting_Id 4 not readable)"));
+    }
+
+    #[test]
+    fn json_line_is_exactly_what_the_readme_shows() {
+        // The README quotes this line as the --json contract; serde_json
+        // emits keys alphabetically, and this pins both the keys and the order.
+        let led = LedIndicator::resolve(Some(1), Some(3));
+        assert_eq!(
+            led.to_json().to_string(),
+            r#"{"colour":"white","lighting_id":4,"smart_fan_mode":3,"source":"read","state_index":1}"#
+        );
+    }
+
+    #[test]
+    fn json_reports_unavailable_when_nothing_was_read() {
+        let led = LedIndicator::resolve(None, None);
+        assert_eq!(
+            led.to_json().to_string(),
+            r#"{"colour":null,"lighting_id":4,"smart_fan_mode":null,"source":"unavailable","state_index":null}"#
+        );
+        let unmeasured = LedIndicator::resolve(Some(7), Some(3));
+        assert_eq!(
+            unmeasured.to_json().to_string(),
+            r#"{"colour":null,"lighting_id":4,"smart_fan_mode":3,"source":"unmeasured_index","state_index":7}"#
+        );
     }
 
     #[test]

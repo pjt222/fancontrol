@@ -94,9 +94,10 @@ const VIRIDIS_HOT: Color = Color::Rgb(253, 231, 37); // step 10 — bright yello
 /// Messages from the background poller to the UI thread.
 enum PollMsg {
     FanData(Vec<Fan>),
-    SmartFanMode(Option<u32>),
-    /// `Lighting_Id 4 -> Current_State_Type`, read beside the mode each cycle.
-    Lighting(Option<u32>),
+    /// SmartFanMode and `Lighting_Id 4 -> Current_State_Type`, read together
+    /// each cycle and applied together, so a frame never shows a mode from one
+    /// instant beside an index from another.
+    ModeAndLighting(crate::platform::ModeAndLighting),
     CustomCurveSet {
         fan_id: u32,
         sensor_id: u32,
@@ -575,12 +576,10 @@ fn run_inner() -> Result<()> {
             }
         }
 
-        // Read initial SmartFanMode and the power-button lighting state.
-        if let Ok(mode) = ctrl.get_smart_fan_mode() {
-            let _ = tx.send(PollMsg::SmartFanMode(mode));
-        }
-        if let Ok(index) = ctrl.get_lighting_state(POWER_BUTTON_LIGHTING_ID) {
-            let _ = tx.send(PollMsg::Lighting(index));
+        // Read initial SmartFanMode and the power-button lighting state, as
+        // one pair from one instant.
+        if let Ok(pair) = ctrl.get_mode_and_lighting(POWER_BUTTON_LIGHTING_ID) {
+            let _ = tx.send(PollMsg::ModeAndLighting(pair));
         }
 
         while !stop_poller.load(std::sync::atomic::Ordering::Relaxed) {
@@ -662,14 +661,12 @@ fn run_inner() -> Result<()> {
                     }
                 }
 
-                // Read SmartFanMode and the lighting state each cycle. Both
-                // move without this process: Fn+Q, Vantage, and on battery
-                // the button changes while the register does not (CLAUDE.md).
-                if let Ok(mode) = ctrl.get_smart_fan_mode() {
-                    let _ = tx.send(PollMsg::SmartFanMode(mode));
-                }
-                if let Ok(index) = ctrl.get_lighting_state(POWER_BUTTON_LIGHTING_ID) {
-                    let _ = tx.send(PollMsg::Lighting(index));
+                // Read SmartFanMode and the lighting state each cycle, as one
+                // pair. Both move without this process: Fn+Q, Vantage, and
+                // without the barrel adapter the button changes while the
+                // register does not (CLAUDE.md).
+                if let Ok(pair) = ctrl.get_mode_and_lighting(POWER_BUTTON_LIGHTING_ID) {
+                    let _ = tx.send(PollMsg::ModeAndLighting(pair));
                 }
             }
 
@@ -695,11 +692,9 @@ fn run_inner() -> Result<()> {
         while let Ok(msg) = rx.try_recv() {
             match msg {
                 PollMsg::FanData(fans) => app.update_fans(fans),
-                PollMsg::SmartFanMode(mode) => {
-                    app.smart_fan_mode = mode;
-                }
-                PollMsg::Lighting(index) => {
-                    app.lighting_index = index;
+                PollMsg::ModeAndLighting(pair) => {
+                    app.smart_fan_mode = pair.smart_fan_mode;
+                    app.lighting_index = pair.lighting_state;
                 }
                 PollMsg::CustomCurveSet { fan_id, sensor_id } => {
                     // Mark the editor as held.

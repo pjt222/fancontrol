@@ -14,7 +14,7 @@ use std::process::Command;
 
 use log::{debug, error, info, warn};
 
-use super::FanController;
+use super::{FanController, ModeAndLighting};
 use crate::errors::FanControlError;
 use crate::fan::{validate_custom_curve, CustomFanCurve, Fan, FanCurve, FanCurvePoint};
 
@@ -117,6 +117,18 @@ fn parse_lighting_state(output: &str) -> Option<u32> {
         return None;
     }
     first.parse::<u32>().ok()
+}
+
+/// Parse the integer after `tag` on the first line that starts with it, as
+/// the combined mode-and-lighting script prints them (`MODE|3`, `LED|1`). An
+/// empty value (`LED|`, the script's own "failed" marker) or a missing line
+/// is `None`.
+fn parse_tagged_u32(output: &str, tag: &str) -> Option<u32> {
+    output
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix(tag))
+        .and_then(|value| value.trim().parse::<u32>().ok())
 }
 
 /// Parse a single `TABLE|...` line into a `TableEntry`.
@@ -850,6 +862,23 @@ impl LenovoFanController {
             .map_err(|e| FanControlError::Platform(format!("failed to parse fan speed: {e}")))
     }
 
+    /// Whether a lighting read may be attempted now. After
+    /// LIGHTING_FAILURES_BEFORE_SUSPEND consecutive failures only one call in
+    /// LIGHTING_RETRY_EVERY is allowed, so a transient fault does not stick
+    /// and a firmware without the class does not pay for it every poll.
+    fn lighting_read_allowed(&self) -> bool {
+        if self.lighting_failures.get() < LIGHTING_FAILURES_BEFORE_SUSPEND {
+            return true;
+        }
+        let skips = self.lighting_skips.get() + 1;
+        self.lighting_skips.set(skips);
+        if skips.is_multiple_of(LIGHTING_RETRY_EVERY) {
+            debug!("lighting read suspended; retrying once (skip {skips})");
+            return true;
+        }
+        false
+    }
+
     /// Count a lighting-read failure; warn once when the read is suspended.
     fn note_lighting_failure(&self, lighting_id: u32, reason: &str) {
         let failures = self.lighting_failures.get() + 1;
@@ -1167,15 +1196,8 @@ impl FanController for LenovoFanController {
     }
 
     fn get_lighting_state(&self, lighting_id: u32) -> Result<Option<u32>, FanControlError> {
-        // Suspended after repeated failures; still try one read in every
-        // LIGHTING_RETRY_EVERY so a transient fault does not stick.
-        if self.lighting_failures.get() >= LIGHTING_FAILURES_BEFORE_SUSPEND {
-            let skips = self.lighting_skips.get() + 1;
-            self.lighting_skips.set(skips);
-            if !skips.is_multiple_of(LIGHTING_RETRY_EVERY) {
-                return Ok(None);
-            }
-            debug!("lighting read suspended; retrying once (skip {skips})");
+        if !self.lighting_read_allowed() {
+            return Ok(None);
         }
 
         // The getter only. The setter, Set_Lighting_Current_Status, is never
@@ -1204,6 +1226,53 @@ impl FanController for LenovoFanController {
                 Ok(None)
             }
         }
+    }
+
+    fn get_mode_and_lighting(&self, lighting_id: u32) -> Result<ModeAndLighting, FanControlError> {
+        // One process for both values, so the pair is from the same instant
+        // (see the trait doc). Each part catches its own failure and prints
+        // an empty value, so one missing class does not cost the other read.
+        // The lighting part is left out while the read is suspended.
+        let read_lighting = self.lighting_read_allowed();
+        let lighting_part = if read_lighting {
+            format!(
+                "try {{ $lm = Get-WmiObject -Namespace root/WMI -Class LENOVO_LIGHTING_METHOD -ErrorAction Stop; \
+                 Write-Output ('LED|' + ($lm.Get_Lighting_Current_Status({lighting_id})).Current_State_Type) }} \
+                 catch {{ Write-Output 'LED|' }}"
+            )
+        } else {
+            String::new()
+        };
+        let script = format!(
+            "$gz = Get-WmiObject -Namespace root/WMI -Class LENOVO_GAMEZONE_DATA; \
+             try {{ $r = $gz.GetSmartFanMode(); $v = $r.Data; if ($null -eq $v) {{ $v = $r.mode }}; \
+             Write-Output ('MODE|' + $v) }} catch {{ Write-Output 'MODE|' }}; {lighting_part}"
+        );
+        let output = Self::ps_command(&script)?;
+
+        let smart_fan_mode = parse_tagged_u32(&output, "MODE|");
+        if smart_fan_mode.is_none() {
+            warn!("Could not determine SmartFanMode from output: {output:?}");
+        }
+        let lighting_state = if read_lighting {
+            match parse_tagged_u32(&output, "LED|") {
+                Some(index) => {
+                    self.lighting_failures.set(0);
+                    Some(index)
+                }
+                None => {
+                    self.note_lighting_failure(lighting_id, &format!("no LED value in {output:?}"));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        debug!("mode {smart_fan_mode:?}, Lighting_Id {lighting_id} {lighting_state:?}");
+        Ok(ModeAndLighting {
+            smart_fan_mode,
+            lighting_state,
+        })
     }
 
     fn get_fan_curves(&self) -> Result<Vec<FanCurve>, FanControlError> {
@@ -1924,6 +1993,22 @@ mod tests {
         assert_eq!(parse_lighting_state("Ausnahme beim Aufrufen"), None);
         assert_eq!(parse_lighting_state("1\n2"), None);
         assert_eq!(parse_lighting_state("-1"), None);
+    }
+
+    #[test]
+    fn parse_tagged_u32_reads_the_combined_script_output() {
+        let output = "MODE|3\r\nLED|1\r\n";
+        assert_eq!(parse_tagged_u32(output, "MODE|"), Some(3));
+        assert_eq!(parse_tagged_u32(output, "LED|"), Some(1));
+        // The script's own failure markers, and a missing line.
+        assert_eq!(parse_tagged_u32("MODE|\nLED|", "MODE|"), None);
+        assert_eq!(parse_tagged_u32("MODE|\nLED|", "LED|"), None);
+        assert_eq!(parse_tagged_u32("MODE|3", "LED|"), None);
+        // Error text that reached stdout is not a value.
+        assert_eq!(
+            parse_tagged_u32("MODE|Ausnahme beim Aufrufen", "MODE|"),
+            None
+        );
     }
 
     #[test]
