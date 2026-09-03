@@ -27,7 +27,10 @@ manipulations that reach the LED or the mode by other paths:
              restores an LED and a mode register on resume is a likely place
              for the two to skew. Skipped in Custom: curve retention across
              sleep is unmeasured (CLAUDE.md), and waking into Custom with a
-             lost table is the fans-off hazard.
+             lost table is the fans-off hazard. Samples right after resume
+             that read no-mode or no-reading are the elevated process's WMI
+             handles, not a firmware fact; read the register and the index
+             from the samples that do read.
   fnq        Fn+Q once: the EC hotkey path. Sampled once on 2026-09-03: the
              register and id 4 moved within the same sample, about a second.
   fnspace    Fn+Space once: the usual Lenovo keyboard-backlight binding, which
@@ -187,6 +190,38 @@ function Get-BatteryLabel {
         { $_ -in @('2', '3', '6', '7', '8', '9', '11') }   { return 'AC' }
         default                                            { return 'unknown' }
     }
+}
+
+function Get-ExpectedColour {
+    # SmartFanMode -> the colour the operator reported for it in the attended
+    # 2026-09-02 15:27 run of Get-LenovoLighting.ps1 (CLAUDE.md): blue, white,
+    # red, and "all three (at least red and blue)" for Custom, called multi.
+    param([AllowNull()]$Mode)
+    switch ("$Mode") {
+        '1'     { return 'blue' }
+        '2'     { return 'white' }
+        '3'     { return 'red' }
+        '255'   { return 'multi' }
+        default { return $null }
+    }
+}
+
+function Get-ColourClass {
+    # Loose word match on the operator's text, so the summary can put it
+    # beside the colour measured for the mode. The verbatim text is logged
+    # regardless. $null for an empty answer; 'unclassified' for text naming
+    # none of the known words. Two of blue/white/red named together, or
+    # "three", "multi", "all", "purple" or "pink" (red and blue lit together),
+    # read as multi.
+    param([AllowNull()][string]$Text)
+    if ($null -eq $Text -or $Text.Trim().Length -eq 0) { return $null }
+    $t = $Text.ToLowerInvariant()
+    $named = @()
+    foreach ($w in @('blue', 'white', 'red')) { if ($t.Contains($w)) { $named += $w } }
+    if ($t.Contains('three') -or $t.Contains('multi') -or $t.Contains('all ') -or $t.Contains('purple') -or $t.Contains('pink') -or $named.Count -ge 2) { return 'multi' }
+    if ($named.Count -eq 1) { return $named[0] }
+    if ($t.Contains('off') -or $t.Contains('dark') -or $t.Contains('none')) { return 'off' }
+    return 'unclassified'
 }
 
 function Get-SampleVerdict {
@@ -437,7 +472,23 @@ function Read-ColourAtAnswer {
     } else {
         Write-ToolLog ("  operator (" + $when + " s into the phase): '" + $answer + "'; at the answer mode " + $m + ", id4 " + $s)
     }
-    return @{ colour = $answer; mode = $m; state4 = $s }
+    # The verdict compares id 4 with the register. A button that changes while
+    # both hold still is a third shape, visible only here: the operator's
+    # colour against the colour measured for the mode at the answer.
+    $class = Get-ColourClass $answer
+    $expected = Get-ExpectedColour $m
+    $match = 'not observed'
+    if ($null -ne $class) {
+        if ($class -eq 'unclassified' -or $null -eq $expected) { $match = 'unclassified' }
+        elseif ($class -eq $expected) { $match = 'matches' }
+        else { $match = 'DIFFERS' }
+    }
+    if ($match -eq 'DIFFERS') {
+        Write-ToolLog ("  WARNING: the colour reads as " + $class + ", but mode " + $m + " measured " + $expected + " on 2026-09-02: the button moved without the register, or the report needs a second look")
+    } elseif ($null -ne $class) {
+        Write-ToolLog ("  colour reads as " + $class + "; mode " + $m + " measured " + $expected + " on 2026-09-02: " + $match)
+    }
+    return @{ colour = $answer; mode = $m; state4 = $s; colourClass = $class; colourExpected = $expected; colourMatch = $match }
 }
 
 function Set-FullSpeedThroughModule {
@@ -525,7 +576,8 @@ function Invoke-Phase {
         key = $Key; title = $spec.title; label = ''; skipped = $false; skipReason = ''
         modeAtStart = $null; modeAtEnd = $null; state4AtStart = $null; state4AtEnd = $null
         battAtStart = $null; battAtEnd = $null; changed = @(); battLabels = @()
-        counts = $null; colour = $null; vantageOffer = $null; keyboardSeen = $null; note = ''; measuredNothing = $false
+        counts = $null; colour = $null; colourClass = $null; colourExpected = $null; colourMatch = 'not observed'
+        vantageOffer = $null; keyboardSeen = $null; note = ''; measuredNothing = $false
         unresolved = 0; resolvedLags = @(); mismatches = @()
     }
     Write-ToolLog ""
@@ -596,6 +648,10 @@ function Invoke-Phase {
         }
     }
 
+    if ($Key -eq 'sleepwake') {
+        # No field confirms that a suspend happened; the row says so.
+        $record['label'] = "sleep and wake on the operator's word"
+    }
     if ($Key -eq 'sleepwake' -and "$modeNow" -eq '255') {
         $record['skipped'] = $true; $record['skipReason'] = 'mode is Custom (255); curve retention across sleep is unmeasured, and waking into Custom with a lost table is the fans-off hazard'
         Write-ToolLog ("  Phase skipped: " + $record['skipReason'])
@@ -671,6 +727,14 @@ function Invoke-Phase {
         }
     }
 
+    # The hotkey phase measures a mode change made by the EC; a window in
+    # which the mode never moved missed the keypress and counts as nothing.
+    if ($Key -eq 'fnq' -and -not ($win.changed -contains 'mode')) {
+        $record['measuredNothing'] = $true
+        $record['note'] = 'the mode did not move during the window, so the Fn+Q press was missed or landed outside it; this phase measured nothing about the hotkey path'
+        Write-ToolLog ("  NOTE: " + $record['note'])
+    }
+
     if ($Key -eq 'fnspace') {
         # Nothing objective confirms the keypress (the mode and the battery do
         # for the other phases), so the log carries the operator's word on
@@ -683,6 +747,9 @@ function Invoke-Phase {
 
     $obs = Read-ColourAtAnswer -Key $Key -SincePhase $phaseClock
     $record['colour'] = $obs.colour
+    $record['colourClass'] = $obs.colourClass
+    $record['colourExpected'] = $obs.colourExpected
+    $record['colourMatch'] = $obs.colourMatch
     $record['modeAtEnd'] = $obs.mode
     $record['state4AtEnd'] = $obs.state4
 
@@ -804,6 +871,7 @@ if ($phaseRecords.Count -gt 0) {
     $lagsAll = @()
     $manipulations = @()
     $unresolvedIn = @()
+    $colourMatches = 0; $colourOther = 0; $colourDiffers = @()
     foreach ($r in $phaseRecords) {
         if ($r['skipped']) {
             Write-ToolLog ("  " + $r['key'] + ": skipped (" + $r['skipReason'] + ")")
@@ -827,7 +895,15 @@ if ($phaseRecords.Count -gt 0) {
         # A phase whose note says it measured nothing (no AC transition fell in
         # its window) is not a manipulation either; its samples still count.
         if (-not $isControl -and -not $r['measuredNothing']) { $manipulations += $r['key'] }
-        $colour = $(if ($null -eq $r['colour'] -or $r['colour'].Length -eq 0) { '(not observed)' } else { $r['colour'] })
+        $colour = $(if ($null -eq $r['colour'] -or $r['colour'].Length -eq 0) { '(not observed)' } else { "'" + $r['colour'] + "'" })
+        if ($null -ne $r['colourClass']) {
+            $colour = $colour + " (reads as " + $r['colourClass'] + "; mode " + $r['modeAtEnd'] + " measured " + $r['colourExpected'] + ": " + $r['colourMatch'] + ")"
+        }
+        switch ($r['colourMatch']) {
+            'matches' { $colourMatches++ }
+            'DIFFERS' { $colourDiffers += $r['key'] }
+            default   { $colourOther++ }
+        }
         $moved = $(if ($r['changed'].Count -gt 0) { ($r['changed'] -join ', ') } else { 'none' })
         $label = $(if ($r['label'].Length -gt 0) { ' [' + $r['label'] + ']' } else { '' })
         if ($r['measuredNothing']) { $label = $label + ' [measured nothing]' }
@@ -856,6 +932,15 @@ if ($phaseRecords.Count -gt 0) {
     }
     Write-ToolLog ("VERDICT: " + $verdict)
     Write-ToolLog ("The fullspeed phase, if run, also answers whether the LED changes under full speed (the operator's colour in that row); its samples count toward the verdict like any other window.")
+    # The verdict is register versus index. The button versus either is a
+    # separate line, because a button that moves while both hold still
+    # would leave the verdict untouched and matter to #44 all the same.
+    Write-ToolLog ("Operator colour against the colour measured for the mode at the answer: " + $colourMatches + " match, " + $colourDiffers.Count + " differ" +
+                   $(if ($colourDiffers.Count -gt 0) { " (" + ($colourDiffers -join ', ') + ")" } else { "" }) + ", " + $colourOther + " unclassified or not observed.")
+    if ($colourDiffers.Count -gt 0) {
+        Write-ToolLog ("WARNING: in the phases listed the button did not show the colour measured for the register's mode. The verdict above does not cover that; read those rows.")
+    }
+    $result['colourDiffers'] = $colourDiffers
     $result['verdict'] = $verdict
     $result['sustained'] = $sustainedTotal
     $result['unresolved'] = $unresolvedTotal

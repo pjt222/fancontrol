@@ -216,7 +216,10 @@ firmware, so LLT's `GetDefaultFanMaxSpeedAsync` would fail here;
 `LENOVO_LIGHTING_METHOD` exists with `Get_Lighting_Current_Status` /
 `Set_Lighting_Current_Status`; `LENOVO_LIGHTING_DATA` reports 6 instances of which
 only `Lighting_Id` 0 and 4 are real — the other four carry `Lighting_Id = 255`.
-Their descriptor rows, read 2026-08-19 12:55 and unchanged in every read since:
+Their descriptor rows, read in full 2026-08-19 12:55; the four fields the later
+dumps re-read (`Lighting_Type`, `Brightness_Level`, `State_Type_Num`,
+`Control_Interface`) were unchanged on 2026-09-02 and 2026-09-03, the `Default_*`
+fields were read once:
 id 0 `Lighting_Type 1, Brightness_Level 4, Default_Brightness_Level 3,
 State_Type_Num 5, Control_Interface 0`; id 4 `Lighting_Type 0, Brightness_Level 0,
 Default_State 1, State_Type_Num 4, Control_Interface 1`. What id 0 is remains
