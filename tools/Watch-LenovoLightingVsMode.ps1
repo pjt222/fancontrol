@@ -357,6 +357,7 @@ function Resolve-Mismatch {
     $detail = @()
     $kind = 'sustained'
     $agreedAfter = $null
+    $nullReads = 0
     while ($clock.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
         Start-Sleep -Milliseconds 400
         $m = Get-Mode
@@ -364,7 +365,15 @@ function Resolve-Mismatch {
         $t = [Math]::Round($clock.Elapsed.TotalSeconds, 1)
         $detail += ("+" + $t + " s mode " + $m + " id4 " + $s)
         if ("$m" -ne "$FirstMode") { $kind = 'inconclusive'; break }
-        if ($null -ne $s -and "$s" -eq "$Expected") { $kind = 'transient'; $agreedAfter = $t; break }
+        # A lighting read that fails is not a reading that disagrees. Three
+        # in a row (the shape a dropped WMI handle takes right after resume)
+        # end the episode as inconclusive, as a failed mode read does at once.
+        if ($null -eq $s) {
+            $nullReads++
+            if ($nullReads -ge 3) { $kind = 'inconclusive'; break }
+            continue
+        }
+        if ("$s" -eq "$Expected") { $kind = 'transient'; $agreedAfter = $t; break }
     }
     return @{
         kind = $kind; agreedAfter = $agreedAfter; heldFor = [Math]::Round($clock.Elapsed.TotalSeconds, 1)
@@ -407,6 +416,18 @@ function Invoke-SampleWindow {
         if ($changed.Count -gt 0) { $tag = '  CHANGE: ' + ($changed -join ', ') }
         Write-ToolLog ("  t=" + $t0 + " s  " + (Format-Sample $sample) + "  [" + $verdict + "]" + $tag)
 
+        # An open sustained episode stops being evidence once the register
+        # moves: nothing can then close it at its own mode, and leaving it
+        # unresolved would be the DISAGREED verdict on a mode change. The
+        # same reasoning makes a mismatch inconclusive inside the re-read loop.
+        if ($postSwitch -and $null -ne $open) {
+            $open['kind'] = 'inconclusive'
+            $counts['sustained']--
+            $counts['inconclusive']++
+            Write-ToolLog ("      the mode moved while the sustained episode from t=" + $open.t + " s was open; that episode is inconclusive, not unresolved")
+            $open = $null
+        }
+
         foreach ($id in $LightingIds) {
             $e = $sample.states["$id"]
             if ($null -ne $e.err) { Write-ToolLog ("      Lighting_Id " + $id + " -> ERROR: " + $e.err) }
@@ -431,6 +452,12 @@ function Invoke-SampleWindow {
                     'transient'    { Write-ToolLog ("      transient mismatch: agreed again after " + $res.agreedAfter + " s" + $switchNote + ". First: " + $res.first + ". Re-reads: " + $res.detail) }
                     'inconclusive' { Write-ToolLog ("      mismatch inconclusive: the mode moved during the re-reads" + $switchNote + ". First: " + $res.first + ". Re-reads: " + $res.detail) }
                     default        {
+                        if ($null -ne $open) {
+                            # Same mode, a different wrong index: the earlier
+                            # episode never agreed and stays unresolved; say so
+                            # rather than replacing it silently.
+                            Write-ToolLog ("      the sustained episode from t=" + $open.t + " s (id4 " + $open.state4 + ") stays unresolved; a new one opens with id4 " + $state4 + " at the same mode")
+                        }
                         $open = $episode
                         Write-ToolLog ("      WARNING: SUSTAINED disagreement, held " + $res.heldFor + " s with the mode at " + $sample.modeBefore + $switchNote + ". First: " + $res.first + ". Re-reads: " + $res.detail)
                     }
