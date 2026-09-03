@@ -14,18 +14,21 @@ mode and every lighting id continuously while the operator applies
 manipulations that reach the LED or the mode by other paths:
 
   baseline   no action. The control phase: how the fields behave at rest.
-  unplug     AC adapter out, in Performance. If the firmware forces the button
-             white on battery while GetSmartFanMode still reads 3, id 4 either
-             follows the LED (index 1) or the register (index 2). Decisive
-             either way; a mode that reads 2 on battery is a third, also
-             useful, outcome (the register moved without SetSmartFanMode).
+  unplug     AC adapter out, in Performance. Whether this firmware changes
+             anything on battery is unmeasured. If it forces the button white
+             while GetSmartFanMode still reads 3, id 4 either follows the LED
+             (index 1) or the register (index 2), decisive either way; a mode
+             that reads 2 on battery is a third outcome (the register moved
+             without SetSmartFanMode); nothing changing is a null result.
   replug     AC adapter back in.
   fnq        Fn+Q once: the EC hotkey path, which no run has sampled (the
              sweeps went through WMI).
-  fnspace    Fn+Space once: the keyboard backlight. Tests whether ids 0/1/2/3/5
-             report any lighting live. Id 0's descriptor row (Lighting_Type 1,
-             Brightness_Level 4, State_Type_Num 5) looks like a multi-level
-             zone, but nothing has measured what it is.
+  fnspace    Fn+Space once: the usual Lenovo keyboard-backlight binding, which
+             on this machine changes the keyboard colour (operator's report,
+             2026-09-03). Tests whether ids 0/1/2/3/5 report any lighting
+             live; on 2026-09-03 none moved while the keyboard colour did.
+             Id 0's descriptor row (quoted in CLAUDE.md) looks like a
+             multi-level zone, but nothing has measured what it is.
   fullspeed  only with -IncludeFullSpeed: Fan_Set_FullSpeed(1) for one window.
              The operator's colour there answers whether the LED changes under
              full speed, an indicator fact for #44 on its own. The window's
@@ -40,6 +43,10 @@ while the operator performs the action, then the operator types the colour the
 button shows. Every sample reads the mode, then each lighting id, then the mode
 again, then Win32_Battery.BatteryStatus and Fan_Get_FullSpeed, and is stamped
 with stopwatch seconds since the window opened plus the sample's own duration.
+Win32_Battery is the adapter column. LENOVO_OTHER_METHOD.Get_AC_PD_Status was
+read once per phase in the 2026-09-03 13:53 run and returned AC_PD_Status = 0
+throughout while the barrel adapter was in, which is not what an adapter
+indicator would show; it is not read any more.
 Sampling runs as fast as the calls return, targeting one sample per second;
 the label carries the measured time, not the target.
 
@@ -137,7 +144,7 @@ if ($IncludeFullSpeed) {
 Write-ToolLog ""
 
 $result = [ordered]@{ ok = $false }
-$gz = $null; $lm = $null; $fm = $null; $om = $null
+$gz = $null; $lm = $null; $fm = $null
 $script:FullSpeedCalled = $false
 $phaseRecords = New-Object System.Collections.ArrayList
 
@@ -160,9 +167,12 @@ function Get-ExpectedIndex {
 }
 
 function Get-BatteryLabel {
-    # Win32_Battery.BatteryStatus: 1 discharging, 2 on AC, 3 fully charged,
-    # 4 low, 5 critical, 6-9 charging, 10 undefined, 11 partially charged.
-    # Folded to the one distinction the unplug phase needs.
+    # Win32_Battery.BatteryStatus per Microsoft's documentation: 1 discharging,
+    # 2 on AC, 3 fully charged, 4 low, 5 critical, 6-9 charging, 10 undefined,
+    # 11 partially charged. Folded to the one distinction the unplug phase
+    # needs. On this machine only 2, while on the barrel adapter, has been
+    # read (2026-09-03); the raw value is logged beside the label for that
+    # reason.
     param([AllowNull()]$Raw)
     switch ("$Raw") {
         { $_ -in @('1', '4', '5') }                        { return 'battery' }
@@ -406,15 +416,6 @@ function Invoke-SampleWindow {
     }
 }
 
-function Write-AcPdStatus {
-    # LENOVO_OTHER_METHOD.Get_AC_PD_Status, dumped whole because its output
-    # property name is unmeasured. Likely USB-C PD rather than the barrel
-    # connector; Win32_Battery is the verdict column for the unplug phase.
-    if ($null -eq $om) { return }
-    Write-ToolLog "  Get_AC_PD_Status:"
-    [void](Invoke-LenovoWmiMethod -WmiObject $om -Method 'Get_AC_PD_Status' -Property 'Status' -AsObject)
-}
-
 function Read-ColourAtAnswer {
     # The operator's colour beside the pair re-read at the moment of the
     # answer, as Get-LenovoLighting.ps1 does.
@@ -527,7 +528,6 @@ function Invoke-Phase {
     $modeNow = Get-Mode
     $record['modeAtStart'] = $modeNow
     Write-ToolLog ("  mode at phase start: " + $modeNow)
-    Write-AcPdStatus
 
     if ($Key -eq 'unplug' -and "$modeNow" -ne '3') {
         Write-ToolLog ("  Mode reads " + $modeNow + "; the downgrade test needs Performance (3).")
@@ -694,7 +694,6 @@ try {
     $gz = Get-LenovoWmiClass -ClassName 'LENOVO_GAMEZONE_DATA' -Single
     $lm = Get-LenovoWmiClass -ClassName 'LENOVO_LIGHTING_METHOD' -Single
     $fm = Get-LenovoWmiClass -ClassName 'LENOVO_FAN_METHOD' -Single
-    $om = Get-LenovoWmiClass -ClassName 'LENOVO_OTHER_METHOD' -Single
     if ($null -eq $gz) { throw "LENOVO_GAMEZONE_DATA unavailable" }
     if ($null -eq $lm) {
         Write-ToolLog "RESULT: LENOVO_LIGHTING_METHOD is absent on this firmware; there is no id 4 to compare with the mode."
