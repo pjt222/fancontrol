@@ -106,6 +106,19 @@ fn parse_fullspeed(output: &str) -> bool {
     false
 }
 
+/// Parse the single integer `Current_State_Type` that the lighting read
+/// prints. PowerShell writes the property bare (`2`), possibly with a trailing
+/// newline; anything else (an error text that reached stdout, an empty
+/// result from a firmware that lacks the id) is `None`.
+fn parse_lighting_state(output: &str) -> Option<u32> {
+    let mut lines = output.lines().map(str::trim).filter(|l| !l.is_empty());
+    let first = lines.next()?;
+    if lines.next().is_some() {
+        return None;
+    }
+    first.parse::<u32>().ok()
+}
+
 /// Parse a single `TABLE|...` line into a `TableEntry`.
 ///
 /// Fields 10 and 11 carry the firmware-reported fan range and are optional:
@@ -765,12 +778,28 @@ fn format_ps_byte_array(bytes: &[u8]) -> String {
 // ---------------------------------------------------------------------------
 
 /// Lenovo Legion fan controller backed by vendor-specific WMI classes.
+/// Consecutive lighting-read failures after which the read is suspended.
+///
+/// A firmware without `LENOVO_LIGHTING_METHOD` fails every time, and the TUI
+/// and GUI poll every 1.5 s, so without this each poll would pay for a
+/// PowerShell process that cannot succeed.
+const LIGHTING_FAILURES_BEFORE_SUSPEND: u32 = 3;
+
+/// While suspended, one read in this many is still attempted, so a transient
+/// WMI failure does not disable the indicator for the rest of the process.
+/// At the 1.5 s poll that is about one attempt a minute.
+const LIGHTING_RETRY_EVERY: u32 = 40;
+
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub struct LenovoFanController {
     /// Per-fan RPM ranges, populated on first discover().
     fan_ranges: std::cell::RefCell<HashMap<u32, FanRpmRange>>,
     /// Whether the hardcoded-fallback warning has already been emitted.
     warned_default_range: std::cell::Cell<bool>,
+    /// Consecutive failures of the lighting read; reset by a success.
+    lighting_failures: std::cell::Cell<u32>,
+    /// Reads skipped while the lighting read is suspended.
+    lighting_skips: std::cell::Cell<u32>,
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -779,6 +808,8 @@ impl LenovoFanController {
         Self {
             fan_ranges: std::cell::RefCell::new(HashMap::new()),
             warned_default_range: std::cell::Cell::new(false),
+            lighting_failures: std::cell::Cell::new(0),
+            lighting_skips: std::cell::Cell::new(0),
         }
     }
 
@@ -817,6 +848,21 @@ impl LenovoFanController {
         output
             .parse::<u32>()
             .map_err(|e| FanControlError::Platform(format!("failed to parse fan speed: {e}")))
+    }
+
+    /// Count a lighting-read failure; warn once when the read is suspended.
+    fn note_lighting_failure(&self, lighting_id: u32, reason: &str) {
+        let failures = self.lighting_failures.get() + 1;
+        self.lighting_failures.set(failures);
+        if failures == LIGHTING_FAILURES_BEFORE_SUSPEND {
+            warn!(
+                "Lighting_Id {lighting_id} read failed {failures} times in a row ({reason}); \
+                 suspending the read, retrying one in {LIGHTING_RETRY_EVERY}. The LED indicator \
+                 falls back to the colour derived from SmartFanMode, labelled as derived."
+            );
+        } else {
+            debug!("Lighting_Id {lighting_id} read failed ({failures}): {reason}");
+        }
     }
 
     /// Resolve RPM range for a fan, falling back to defaults.
@@ -1118,6 +1164,46 @@ impl FanController for LenovoFanController {
         );
         Self::ps_command(&script)?;
         Ok(())
+    }
+
+    fn get_lighting_state(&self, lighting_id: u32) -> Result<Option<u32>, FanControlError> {
+        // Suspended after repeated failures; still try one read in every
+        // LIGHTING_RETRY_EVERY so a transient fault does not stick.
+        if self.lighting_failures.get() >= LIGHTING_FAILURES_BEFORE_SUSPEND {
+            let skips = self.lighting_skips.get() + 1;
+            self.lighting_skips.set(skips);
+            if !skips.is_multiple_of(LIGHTING_RETRY_EVERY) {
+                return Ok(None);
+            }
+            debug!("lighting read suspended; retrying once (skip {skips})");
+        }
+
+        // The getter only. The setter, Set_Lighting_Current_Status, is never
+        // called anywhere in this repository; a cargo test enforces that.
+        let script = format!(
+            "$lm = Get-WmiObject -Namespace root/WMI -Class LENOVO_LIGHTING_METHOD; \
+             ($lm.Get_Lighting_Current_Status({lighting_id})).Current_State_Type"
+        );
+        match Self::ps_command(&script) {
+            Ok(output) => match parse_lighting_state(&output) {
+                Some(index) => {
+                    self.lighting_failures.set(0);
+                    debug!("Lighting_Id {lighting_id} Current_State_Type = {index}");
+                    Ok(Some(index))
+                }
+                None => {
+                    self.note_lighting_failure(
+                        lighting_id,
+                        &format!("unparseable output {output:?}"),
+                    );
+                    Ok(None)
+                }
+            },
+            Err(e) => {
+                self.note_lighting_failure(lighting_id, &e.to_string());
+                Ok(None)
+            }
+        }
     }
 
     fn get_fan_curves(&self) -> Result<Vec<FanCurve>, FanControlError> {
@@ -1822,6 +1908,47 @@ mod tests {
     }
 
     // -- parse_fullspeed ----------------------------------------------------
+
+    #[test]
+    fn parse_lighting_state_reads_a_bare_index() {
+        assert_eq!(parse_lighting_state("2"), Some(2));
+        assert_eq!(parse_lighting_state("1\r\n"), Some(1));
+        assert_eq!(parse_lighting_state("  3  \n"), Some(3));
+        assert_eq!(parse_lighting_state("0"), Some(0));
+    }
+
+    #[test]
+    fn parse_lighting_state_rejects_anything_else() {
+        assert_eq!(parse_lighting_state(""), None);
+        assert_eq!(parse_lighting_state("\n"), None);
+        assert_eq!(parse_lighting_state("Ausnahme beim Aufrufen"), None);
+        assert_eq!(parse_lighting_state("1\n2"), None);
+        assert_eq!(parse_lighting_state("-1"), None);
+    }
+
+    #[test]
+    fn lighting_read_suspends_after_repeated_failures_and_retries_periodically() {
+        // Drive the counters the way get_lighting_state does, without WMI.
+        let controller = LenovoFanController::new();
+        for _ in 0..LIGHTING_FAILURES_BEFORE_SUSPEND {
+            controller.note_lighting_failure(4, "test");
+        }
+        assert_eq!(
+            controller.lighting_failures.get(),
+            LIGHTING_FAILURES_BEFORE_SUSPEND
+        );
+        // The suspension logic lives at the top of get_lighting_state and
+        // reads these two cells; check the arithmetic it relies on.
+        let mut attempted = 0;
+        for _ in 0..(LIGHTING_RETRY_EVERY * 2) {
+            let skips = controller.lighting_skips.get() + 1;
+            controller.lighting_skips.set(skips);
+            if skips.is_multiple_of(LIGHTING_RETRY_EVERY) {
+                attempted += 1;
+            }
+        }
+        assert_eq!(attempted, 2);
+    }
 
     #[test]
     fn parse_fullspeed_active() {

@@ -16,6 +16,7 @@ use ratatui::widgets::*;
 
 use crate::config;
 use crate::fan::{smart_fan_mode, CustomFanCurve, Fan, FanCurve, MAX_STEP_VALUE, MINIMUM_STEPS};
+use crate::led::{LedIndicator, POWER_BUTTON_LIGHTING_ID};
 use crate::platform::create_controller;
 
 // ---------------------------------------------------------------------------
@@ -94,7 +95,12 @@ const VIRIDIS_HOT: Color = Color::Rgb(253, 231, 37); // step 10 — bright yello
 enum PollMsg {
     FanData(Vec<Fan>),
     SmartFanMode(Option<u32>),
-    CustomCurveSet { fan_id: u32, sensor_id: u32 },
+    /// `Lighting_Id 4 -> Current_State_Type`, read beside the mode each cycle.
+    Lighting(Option<u32>),
+    CustomCurveSet {
+        fan_id: u32,
+        sensor_id: u32,
+    },
     CustomCurvesCleared,
     Error(String),
 }
@@ -146,6 +152,9 @@ struct App {
     mode: Mode,
     /// SmartFanMode readback from EC.
     smart_fan_mode: Option<u32>,
+    /// Power-button lighting state index (`Lighting_Id 4`), read beside the
+    /// mode. Resolved to a colour by `led::LedIndicator` at draw time.
+    lighting_index: Option<u32>,
     status: String,
     status_until: Option<Instant>,
     quit: bool,
@@ -165,6 +174,7 @@ impl App {
             selected_fan: 0,
             mode: Mode::FanSelect,
             smart_fan_mode: None,
+            lighting_index: None,
             status: "Loading...".into(),
             status_until: None,
             quit: false,
@@ -565,9 +575,12 @@ fn run_inner() -> Result<()> {
             }
         }
 
-        // Read initial SmartFanMode.
+        // Read initial SmartFanMode and the power-button lighting state.
         if let Ok(mode) = ctrl.get_smart_fan_mode() {
             let _ = tx.send(PollMsg::SmartFanMode(mode));
+        }
+        if let Ok(index) = ctrl.get_lighting_state(POWER_BUTTON_LIGHTING_ID) {
+            let _ = tx.send(PollMsg::Lighting(index));
         }
 
         while !stop_poller.load(std::sync::atomic::Ordering::Relaxed) {
@@ -649,9 +662,14 @@ fn run_inner() -> Result<()> {
                     }
                 }
 
-                // Read SmartFanMode each cycle.
+                // Read SmartFanMode and the lighting state each cycle. Both
+                // move without this process: Fn+Q, Vantage, and on battery
+                // the button changes while the register does not (CLAUDE.md).
                 if let Ok(mode) = ctrl.get_smart_fan_mode() {
                     let _ = tx.send(PollMsg::SmartFanMode(mode));
+                }
+                if let Ok(index) = ctrl.get_lighting_state(POWER_BUTTON_LIGHTING_ID) {
+                    let _ = tx.send(PollMsg::Lighting(index));
                 }
             }
 
@@ -679,6 +697,9 @@ fn run_inner() -> Result<()> {
                 PollMsg::FanData(fans) => app.update_fans(fans),
                 PollMsg::SmartFanMode(mode) => {
                     app.smart_fan_mode = mode;
+                }
+                PollMsg::Lighting(index) => {
+                    app.lighting_index = index;
                 }
                 PollMsg::CustomCurveSet { fan_id, sensor_id } => {
                     // Mark the editor as held.
@@ -987,12 +1008,32 @@ fn draw_title(f: &mut Frame, app: &App, area: Rect) {
         Some(smart_fan_mode::PERFORMANCE) => VIRIDIS_HOT, // Performance — yellow
         _ => VIRIDIS_TITLE,                             // Balanced/N/A — teal
     };
+    // The power-button LED: read from Lighting_Id 4, or derived from the mode
+    // and labelled so. Shown beside the mode rather than folded into it,
+    // because on battery the two differ (CLAUDE.md, measured 2026-09-03).
+    let led = LedIndicator::resolve(app.lighting_index, app.smart_fan_mode);
+    let (led_glyph, led_color) = match led.colour {
+        Some(colour) => {
+            let (r, g, b) = colour.rgb();
+            ("\u{25CF}", Color::Rgb(r, g, b))
+        }
+        None => ("\u{25CB}", Color::DarkGray),
+    };
     let title_text = Paragraph::new(Line::from(vec![
         Span::styled("Fan Control", Style::default().fg(VIRIDIS_TITLE).bold()),
         Span::raw(" \u{2014} "),
         Span::styled(
             format!("SmartFanMode: {mode_label}"),
             Style::default().fg(mode_color),
+        ),
+        Span::raw(" \u{2014} "),
+        Span::styled(
+            format!("{led_glyph} "),
+            Style::default().fg(led_color).bold(),
+        ),
+        Span::styled(
+            format!("button {}", led.short_label()),
+            Style::default().fg(VIRIDIS_TITLE),
         ),
     ]))
     .alignment(Alignment::Center)

@@ -35,8 +35,9 @@ cargo build --release --target x86_64-pc-windows-gnu
 ```
 src/
 ├── main.rs          # Entry point, CLI dispatch, logging setup
-├── cli.rs           # clap-derived CLI: list, get, set, monitor, table, set-curve, tui, gui
+├── cli.rs           # clap-derived CLI: list, get, set, monitor, table, set-curve, led, tui, gui
 ├── fan.rs           # Fan/FanCurve/CustomFanCurve structs, MINIMUM_STEPS, validate_custom_curve
+├── led.rs           # Power-button LED indicator: Lighting_Id 4 index -> colour, SmartFanMode fallback labelled derived (#44)
 ├── config.rs        # fancontrol.json load/save; reports out-of-limit saved curves by path
 ├── errors.rs        # FanControlError enum (thiserror-based)
 ├── gui.rs           # egui/eframe GUI with worker thread

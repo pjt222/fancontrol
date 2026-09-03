@@ -110,6 +110,18 @@ when the change landed on `main`.
 
 ### Added
 
+- **`led` subcommand, and a power-button LED indicator in the TUI title and the GUI header.** *(2026-09-03)*
+
+  The indicator reads `LENOVO_LIGHTING_METHOD.Get_Lighting_Current_Status(4)`
+  and maps the state index to the colour measured for it on 2026-09-02
+  (0 blue, 1 white, 2 red, 3 multi). When the read fails it falls back to the
+  colour derived from SmartFanMode and says so. The read is the source
+  because the two differ: with Performance selected and the AC adapter out,
+  the register keeps reading 3 while the index reads 1 and the button is
+  white (measured 2026-09-03, #44). The GUI header now also shows the
+  SmartFanMode. The lighting class is only ever read; a test fails the build
+  on any call to its setter.
+
 - Custom fan curve support for Lenovo Legion via `Fan_Set_Table`, with config
   persistence to `fancontrol.json`.
 - TUI dashboard (ratatui) with an interactive curve editor.

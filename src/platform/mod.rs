@@ -49,6 +49,21 @@ pub trait FanController {
             "SmartFanMode not supported on this platform".to_string(),
         ))
     }
+
+    /// Read `Current_State_Type` for one `Lighting_Id` from the Lenovo lighting
+    /// class (`LENOVO_LIGHTING_METHOD.Get_Lighting_Current_Status`). Returns
+    /// `Ok(None)` where the class is absent or the read fails, so callers fall
+    /// back rather than error; the indicator in `crate::led` labels that case
+    /// as derived. Read-only by construction: the setter is never called, and
+    /// `tests/lighting_setter_forbidden.rs` fails the build if it ever is.
+    ///
+    /// Callers pass `crate::led::POWER_BUTTON_LIGHTING_ID`. The id is a
+    /// parameter rather than baked in because which physical LED id 4
+    /// describes is unproven (CLAUDE.md); the method reads a lighting state,
+    /// the caller decides what to call it.
+    fn get_lighting_state(&self, _lighting_id: u32) -> Result<Option<u32>, FanControlError> {
+        Ok(None)
+    }
 }
 
 // put id:"platform_select", label:"Platform Detection", node_type:"decision", output:"controller.internal"
