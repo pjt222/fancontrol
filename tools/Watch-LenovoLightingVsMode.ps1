@@ -27,9 +27,11 @@ manipulations that reach the LED or the mode by other paths:
              Brightness_Level 4, State_Type_Num 5) looks like a multi-level
              zone, but nothing has measured what it is.
   fullspeed  only with -IncludeFullSpeed: Fan_Set_FullSpeed(1) for one window.
-             Answers whether the LED changes under full speed, an indicator
-             fact for #44. It does not bear on whether id 4 can disagree with
-             the mode, and the summary keeps the two apart.
+             The operator's colour there answers whether the LED changes under
+             full speed, an indicator fact for #44 on its own. The window's
+             samples count toward the verdict like any other: full speed
+             leaves the mode register alone, so an id 4 that moved with the
+             LED here would be the disagreement the run is looking for.
   vantage    whatever Lenovo Vantage offers for the power-button light, typed
              in verbatim by the operator. "none" is a result too.
 
@@ -684,7 +686,14 @@ if ($phaseRecords.Count -gt 0) {
         if ($null -ne $c) { $agree = $c['agree']; $tr = $c['transient']; $su = $c['sustained']; $n = $c['samples'] }
         $sustainedTotal += $su; $transientTotal += $tr; $expectTotal += ($agree + $tr + $su)
         if ($su -gt 0) { $sustainedIn += ($r['key'] + " (" + $su + ")") }
-        if ($r['key'] -ne 'baseline') { $manipulations += $r['key'] }
+        # Baseline is the control; a vantage phase answered "none" is a second
+        # control, not a manipulation, and must not pad the verdict's count.
+        $isControl = ($r['key'] -eq 'baseline')
+        if ($r['key'] -eq 'vantage') {
+            $offer = $r['vantageOffer']
+            if ($null -eq $offer -or $offer.Length -eq 0 -or $offer -eq 'none') { $isControl = $true }
+        }
+        if (-not $isControl) { $manipulations += $r['key'] }
         $colour = $(if ($null -eq $r['colour'] -or $r['colour'].Length -eq 0) { '(not observed)' } else { $r['colour'] })
         $moved = $(if ($r['changed'].Count -gt 0) { ($r['changed'] -join ', ') } else { 'none' })
         $label = $(if ($r['label'].Length -gt 0) { ' [' + $r['label'] + ']' } else { '' })
@@ -704,7 +713,7 @@ if ($phaseRecords.Count -gt 0) {
         $verdict = "Lighting_Id 4 did not disagree with SmartFanMode across " + $expectTotal + " samples with an expectation (" + $transientTotal + " transient mismatches at switches) and " + $manipulations.Count + " manipulations (" + ($manipulations -join ', ') + ")."
     }
     Write-ToolLog ("VERDICT: " + $verdict)
-    Write-ToolLog ("The fullspeed phase, if run, answers whether the LED changes under full speed; it is not evidence either way on the verdict above.")
+    Write-ToolLog ("The fullspeed phase, if run, also answers whether the LED changes under full speed (the operator's colour in that row); its samples count toward the verdict like any other window.")
     $result['verdict'] = $verdict
     $result['sustained'] = $sustainedTotal
     $result['transient'] = $transientTotal
