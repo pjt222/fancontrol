@@ -19,9 +19,10 @@ manipulations that reach the LED or the mode by other paths:
              the register held 3 for the whole window while id 4 read 1,
              Balanced's index, and the operator saw the button white,
              Balanced's colour. id 4 followed the LED and the register did
-             not; id 4 reports the effective mode, GetSmartFanMode the
-             selected one. The phase stays in the default list so a rerun
-             reproduces it. Lighting_Id 3's state moved with the adapter in
+             not: id 4 reports the mode the button shows, GetSmartFanMode the
+             selected one (whether fans and power limits follow is unmeasured;
+             this tool logs no RPM). One cycle so far; the phase stays in the
+             default list so a rerun reproduces it. Lighting_Id 3's state moved with the adapter in
              the same run (1 on AC, 0 on battery).
   replug     AC adapter back in.
   sleepwake  sleep and wake. The action happens before Enter: the operator

@@ -247,36 +247,41 @@ does *not* establish that `Lighting_Id 4` is the power button: both columns
 are functions of the mode the tool set, so any mode-tracking field would score
 four for four, and id 4 reports `Current_Brightness_Level = 0` in every mode
 while the button is visibly lit, so the class is not reporting live LED
-output. On this evidence a value read from id 4 carries the same information
+output. ~~On this evidence a value read from id 4 carries the same information
 as `GetSmartFanMode`. An indicator may show the colour for the current mode,
 labelled as derived from the mode; reading id 4 instead adds a dependency on
-an unlabelled field and buys nothing that was measured. **The last two
-sentences are superseded by the 2026-09-03 measurement below.** Never call
+an unlabelled field and buys nothing that was measured.~~ **Superseded
+2026-09-03** by the measurement in the next paragraph. Never call
 `Set_Lighting_Current_Status`.
 
-**id 4 reports the effective mode; `GetSmartFanMode` reports the selected one.
-Measured 2026-09-03 15:07, run 2 of `tools/Watch-LenovoLightingVsMode.ps1`
-(https://github.com/pjt222/fancontrol/issues/44#issuecomment-5526430479).** With Performance
-selected and the adapter pulled during the window, the register read 3 in
-every bracketed read for the whole 30 s and into the next window, while
-`Lighting_Id 4 -> Current_State_Type` read 1, Balanced's index, from t=6.1 s
-until the adapter returned, and the operator saw the button white, Balanced's
-colour. On replug id 4 read 2 again one sample after `Win32_Battery` reported
-AC, and the button was red. Vantage's thermal-mode page says the same in prose:
-Performance mode only with the adapter connected. Two consequences. An
-indicator must read id 4 (0/1/2/3 to blue/white/red/multi), fall back to the
-mode-derived colour labelled as derived when the read fails, and show unknown
-for any other index. And code that treats `GetSmartFanMode` as the running
-thermal mode is wrong on battery with Performance selected; whether the fans
-and power limits also run as Balanced then is unmeasured (that tool logs no
-RPM). Sleep and wake (resume confirmed from the System log, Kernel-Power 507),
-Fn+Q, Fn+Space, full speed and a mode change made in Vantage all left id 4
-tracking the register. `Lighting_Id 3 -> Current_State_Type` is 1 on AC and 0
-on battery, both directions, in the same samples as `Win32_Battery`; which
-light it describes is unmeasured. Which physical LED id 4 is remains unproven;
-what is measured is that across two independent variables, the mode and the
-adapter, its index mapped to the operator's colour every time and the register
-did not once.
+**id 4 reports the mode the button shows; `GetSmartFanMode` reports the selected
+one. Measured 2026-09-03 15:07, run 2 of `tools/Watch-LenovoLightingVsMode.ps1`,
+one unplug/replug cycle
+(https://github.com/pjt222/fancontrol/issues/44#issuecomment-5526430479).** With
+Performance selected and the adapter pulled during the window, the register
+read 3 in every bracketed read for the whole 30 s and into the next window,
+while `Lighting_Id 4 -> Current_State_Type` read 1, Balanced's index, from
+t=6.1 s until the adapter returned, and the operator saw the button white,
+Balanced's colour. On replug id 4 read 2 again one sample after `Win32_Battery`
+reported AC, and the button was red. Vantage's thermal-mode page (operator's
+paste, German) says Performance mode can only be used with the adapter
+connected, which is why "effective mode" is the natural reading; what is
+measured is the button and the index, since that tool logs no RPM. Two
+consequences. An indicator must read id 4 (0/1/2/3 to blue/white/red/multi),
+fall back to the mode-derived colour labelled as derived when the read fails,
+and show unknown for any other index. And code that treats `GetSmartFanMode`
+as the running thermal mode is wrong on battery with Performance selected, at
+least for what the button shows; whether the fans and power limits also run as
+Balanced then is unmeasured. Sleep and wake (resume confirmed from the System
+log, Kernel-Power 507), Fn+Q, Fn+Space, full speed and a mode change made in
+Vantage all left id 4 tracking the register. `Lighting_Id 3 ->
+Current_State_Type` went 1 to 0 on unplug and 0 to 1 on replug, once each, in
+the same samples as `Win32_Battery`; which light it describes is unmeasured.
+Which physical LED id 4 is remains unproven; what is measured is that across
+two independent variables, the mode and the adapter, its index mapped to the
+operator's colour in every observed state, and the register failed to in one
+of them. One cycle; the unplug phase stays in the tool's default list so a
+rerun reproduces it.
 
 **Which sensor row's thresholds index a written table is unmeasured.**
 `encode_fan_table_bytes` hardcodes `FSID = 0`, and the fan 0 / sensor 3 row
