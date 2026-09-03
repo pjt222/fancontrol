@@ -806,7 +806,12 @@ Write-ToolLog ""
 if ($script:FullSpeedCalled) {
     Write-ToolLog ("OWED: full speed may still be on (see the ERROR above). Change the power mode first if in Custom, then: fancontrol.exe set 0 0")
 } else {
-    Write-ToolLog "Nothing owed: this run wrote no table and no mode."
+    Write-ToolLog "Nothing owed by this run: it wrote no table and selected no mode."
+}
+# True of the tool, not necessarily of the machine: the operator's Fn+Q or
+# Vantage can leave it in Custom, which runs whatever table the EC holds.
+if ($result.Contains('endMode') -and "$($result['endMode'])" -eq '255') {
+    Write-ToolLog ("The machine is in Custom (255) now, running whatever table the EC holds; this tool did not select it. If that table is not one you wrote on purpose, run tools\Reset-LenovoFanState.ps1.")
 }
 Write-ToolLog ("Log: " + $LogPath)
 
