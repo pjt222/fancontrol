@@ -1951,6 +1951,50 @@ mod tests {
     }
 
     #[test]
+    fn lighting_read_control_flow_suspends_and_stops_spawning() {
+        // On a host without powershell.exe (the Linux test runner) every read
+        // fails at launch, which drives the real path through
+        // get_lighting_state rather than the arithmetic alone. If this ever
+        // runs where powershell.exe exists, the first assertion below fails
+        // loudly instead of silently testing something else.
+        let controller = LenovoFanController::new();
+        let first = controller.get_lighting_state(4);
+        assert!(
+            matches!(first, Ok(None)),
+            "expected Ok(None) from a failed read"
+        );
+        assert_eq!(
+            controller.lighting_failures.get(),
+            1,
+            "a failed read must count"
+        );
+        for _ in 1..LIGHTING_FAILURES_BEFORE_SUSPEND {
+            assert!(matches!(controller.get_lighting_state(4), Ok(None)));
+        }
+        assert_eq!(
+            controller.lighting_failures.get(),
+            LIGHTING_FAILURES_BEFORE_SUSPEND
+        );
+        // Suspended: the next calls return without attempting a read, which
+        // shows as the failure count holding still while skips advance.
+        for expected_skips in 1..LIGHTING_RETRY_EVERY {
+            assert!(matches!(controller.get_lighting_state(4), Ok(None)));
+            assert_eq!(controller.lighting_skips.get(), expected_skips);
+            assert_eq!(
+                controller.lighting_failures.get(),
+                LIGHTING_FAILURES_BEFORE_SUSPEND
+            );
+        }
+        // The retry call attempts a read again (and fails again here).
+        assert!(matches!(controller.get_lighting_state(4), Ok(None)));
+        assert_eq!(controller.lighting_skips.get(), LIGHTING_RETRY_EVERY);
+        assert_eq!(
+            controller.lighting_failures.get(),
+            LIGHTING_FAILURES_BEFORE_SUSPEND + 1
+        );
+    }
+
+    #[test]
     fn parse_fullspeed_active() {
         assert!(parse_fullspeed("FULLSPEED|1\nFAN|0|3|2100|45"));
     }
