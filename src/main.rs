@@ -3,6 +3,7 @@ mod config;
 mod errors;
 mod fan;
 mod gui;
+mod led;
 mod platform;
 mod tui;
 
