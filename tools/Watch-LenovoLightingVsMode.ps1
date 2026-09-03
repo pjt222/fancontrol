@@ -14,12 +14,15 @@ mode and every lighting id continuously while the operator applies
 manipulations that reach the LED or the mode by other paths:
 
   baseline   no action. The control phase: how the fields behave at rest.
-  unplug     AC adapter out, in Performance. Whether this firmware changes
-             anything on battery is unmeasured. If it forces the button white
-             while GetSmartFanMode still reads 3, id 4 either follows the LED
-             (index 1) or the register (index 2), decisive either way; a mode
-             that reads 2 on battery is a third outcome (the register moved
-             without SetSmartFanMode); nothing changing is a null result.
+  unplug     AC adapter out, in Performance. Measured 2026-09-03 15:07
+             (run 2, https://github.com/pjt222/fancontrol/issues/44#issuecomment-5526430479):
+             the register held 3 for the whole window while id 4 read 1,
+             Balanced's index, and the operator saw the button white,
+             Balanced's colour. id 4 followed the LED and the register did
+             not; id 4 reports the effective mode, GetSmartFanMode the
+             selected one. The phase stays in the default list so a rerun
+             reproduces it. Lighting_Id 3's state moved with the adapter in
+             the same run (1 on AC, 0 on battery).
   replug     AC adapter back in.
   sleepwake  sleep and wake. The action happens before Enter: the operator
              sleeps the machine, wakes it, signs in, then presses Enter, and
@@ -508,7 +511,10 @@ function Invoke-SampleWindow {
             $counts[$verdict]++
             if ($null -ne $open -and $verdict -eq 'agree' -and "$($open.mode)" -eq "$($sample.modeBefore)") {
                 $open['resolvedAt'] = $t0
-                Write-ToolLog ("      agreement resumed at t=" + $t0 + " s, " + [Math]::Round($t0 - $open.t, 1) + " s after the sustained mismatch at t=" + $open.t + " s, at the same mode: consistent with a repaint lag beyond the timeout; a standing divergence would not agree again without a mode change")
+                # Do not call this lag: on 2026-09-03 the divergence that ended
+                # here ended because the adapter came back (the CHANGE tags on
+                # the samples before say so), not because the index caught up.
+                Write-ToolLog ("      agreement resumed at t=" + $t0 + " s, " + [Math]::Round($t0 - $open.t, 1) + " s after the sustained mismatch at t=" + $open.t + " s, at the same mode. Whether the index caught up or an outside condition ended (an adapter transition, for one) is in the CHANGE tags of the samples before this one.")
                 $open = $null
             }
         }
@@ -1006,7 +1012,9 @@ if ($phaseRecords.Count -gt 0) {
         $moved = $(if ($r['changed'].Count -gt 0) { ($r['changed'] -join ', ') } else { 'none' })
         $label = $(if ($r['label'].Length -gt 0) { ' [' + $r['label'] + ']' } else { '' })
         if ($r['measuredNothing']) { $label = $label + ' [measured nothing]' }
-        $lagText = $(if (@($r['resolvedLags']).Count -gt 0) { '; sustained episodes that agreed again later: ' + (@($r['resolvedLags']) -join ', ') + ' s' } else { '' })
+        # Interpolate each number: -join on doubles follows the OS culture and
+        # printed "13,7 s" on de-DE (2026-09-03), where "$_" is invariant.
+        $lagText = $(if (@($r['resolvedLags']).Count -gt 0) { '; sustained episodes that agreed again later, after: ' + ((@($r['resolvedLags']) | ForEach-Object { "$_" }) -join ', ') + ' s' } else { '' })
         Write-ToolLog ("  " + $r['key'] + $label + ": mode " + $r['modeAtStart'] + " -> " + $r['modeAtEnd'] +
                        ", id4 " + $r['state4AtStart'] + " -> " + $r['state4AtEnd'] +
                        ", battery " + $r['battAtStart'] + " -> " + $r['battAtEnd'] +
@@ -1028,7 +1036,7 @@ if ($phaseRecords.Count -gt 0) {
         # Say how late the agreement came rather than calling any gap "lag":
         # a repaint that slow is unmeasured, and the row prints each gap.
         $maxGap = (@($lagsAll) | Measure-Object -Maximum).Maximum
-        $verdict = "No standing disagreement: " + $sustainedTotal + " sustained episode(s) agreed again later at the same mode, after " + ($lagsAll -join ', ') + " s (largest gap " + $maxGap + " s), across " + $expectTotal + " samples with an expectation and " + $manipulations.Count + " manipulations (" + ($manipulations -join ', ') + "). A standing divergence would not have agreed again without a mode change; whether a repaint can take that long is unmeasured, so read the rows."
+        $verdict = "No standing disagreement within any window: " + $sustainedTotal + " sustained episode(s) agreed again later at the same mode, after " + ((@($lagsAll) | ForEach-Object { "$_" }) -join ', ') + " s (largest gap " + $maxGap + " s), across " + $expectTotal + " samples with an expectation and " + $manipulations.Count + " manipulations (" + ($manipulations -join ', ') + "). Read those rows' CHANGE tags: on 2026-09-03 a divergence ended when the adapter came back, not because the index caught up, so an episode that agrees again can still be id 4 reporting something the register does not."
     } else {
         $verdict = "Lighting_Id 4 did not disagree with SmartFanMode across " + $expectTotal + " samples with an expectation (" + $transientTotal + " transient mismatches that agreed on re-read, " + $inconclusiveTotal + " inconclusive) and " + $manipulations.Count + " manipulations (" + ($manipulations -join ', ') + ")."
     }
