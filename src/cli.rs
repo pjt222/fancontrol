@@ -82,6 +82,10 @@ pub enum Commands {
         save: bool,
     },
 
+    /// Show the power-button LED colour: read from the Lenovo lighting class,
+    /// with the SmartFanMode-derived colour as a labelled fallback
+    Led,
+
     /// Open the graphical fan control interface
     Gui,
 

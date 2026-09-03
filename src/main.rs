@@ -3,6 +3,7 @@ mod config;
 mod errors;
 mod fan;
 mod gui;
+mod led;
 mod platform;
 mod tui;
 
@@ -19,6 +20,7 @@ use simplelog::{ConfigBuilder, LevelFilter, WriteLogger};
 
 use cli::{Cli, Commands};
 use fan::CustomFanCurve;
+use led::{LedIndicator, POWER_BUTTON_LIGHTING_ID};
 use platform::{create_controller, FanController};
 
 // put id:"cli_parse", label:"Parse CLI Arguments", output:"cli_command.internal"
@@ -80,10 +82,48 @@ fn main() -> Result<()> {
                     steps,
                     save,
                 } => cmd_set_curve(&*controller, fan_id, sensor_id, steps, save),
+                Commands::Led => cmd_led(&*controller, json_output),
                 Commands::Gui | Commands::Tui => unreachable!(),
             }
         }
     }
+}
+
+/// Show the power-button LED colour and where the knowledge came from.
+///
+/// Mode and lighting are read as one pair (one PowerShell process on Lenovo),
+/// so the two values are from the same instant. A value that could not be
+/// read arrives as `None` inside `Ok`, and the indicator labels the result
+/// accordingly; only a failure to run the read at all is an error.
+fn cmd_led(controller: &dyn FanController, json_output: bool) -> Result<()> {
+    let pair = controller.get_mode_and_lighting(POWER_BUTTON_LIGHTING_ID)?;
+    let led = LedIndicator::resolve(pair.lighting_state, pair.smart_fan_mode);
+
+    // A value that was not read arrives as None, and the backend keeps the
+    // reason in the log (once at suspension, at debug level otherwise). Say
+    // on stderr that something was not read, so "not readable" in the output
+    // is not mistaken for a fact about the hardware.
+    if pair.smart_fan_mode.is_none() {
+        eprintln!(
+            "warning: SmartFanMode not readable (Lenovo only; other platforms have no such \
+             register). On Lenovo, run with -vv and read fancontrol.log for the reason."
+        );
+    }
+    if pair.lighting_state.is_none() {
+        eprintln!(
+            "warning: Lighting_Id {POWER_BUTTON_LIGHTING_ID} not readable (Lenovo only; other \
+             platforms have no such class). On Lenovo, run with -vv and read fancontrol.log \
+             for the reason."
+        );
+    }
+
+    if json_output {
+        println!("{}", led.to_json());
+        return Ok(());
+    }
+
+    println!("{}", led.describe());
+    Ok(())
 }
 
 fn cmd_list(controller: &dyn FanController, json_output: bool) -> Result<()> {

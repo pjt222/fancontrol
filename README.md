@@ -33,6 +33,7 @@ fancontrol get fan0                # Get fan0 speed in RPM
 fancontrol set fan0 128            # Set fan0 to 50% duty cycle
 fancontrol monitor                 # Live fan monitor (Ctrl+C to stop)
 fancontrol table                   # Display EC fan curve data
+fancontrol led                     # Power-button LED colour and where it was read from
 fancontrol tui                     # Interactive terminal dashboard
 fancontrol gui                     # Graphical interface
 fancontrol list --json             # Machine-readable JSON output
@@ -44,10 +45,10 @@ fancontrol set-curve --fan-id 0 --sensor-id 3 \
 
 ## Features
 
-- **CLI** with subcommands: `list`, `get`, `set`, `monitor`, `table`, `set-curve`, `tui`, `gui`
-- **JSON output** (`--json`) for `list`, `get`, and `table` commands
+- **CLI** with subcommands: `list`, `get`, `set`, `monitor`, `table`, `set-curve`, `led`, `tui`, `gui`
+- **JSON output** (`--json`) for `list`, `get`, `table`, and `led` commands
 - **TUI dashboard** (ratatui) with viridis color scheme, real-time fan/temp display, interactive curve editor, and keyboard-driven controls
-- **GUI** (egui/eframe) with per-fan sliders, EC fan-curve display, and real-time polling. No curve editor or SmartFanMode display yet; those exist only on the unmerged `phase-4-5-config-gui-curves` branch, and #44 tracks the mode display
+- **GUI** (egui/eframe) with per-fan sliders, EC fan-curve display, real-time polling, and a header showing the SmartFanMode and the power-button LED colour (#44). No curve editor yet; that exists only on the unmerged `phase-4-5-config-gui-curves` branch
 - **Config persistence** — save custom curves to `fancontrol.json` with `--save`; auto-reapplied on startup
 - **Custom fan curves** for Lenovo Legion via `Fan_Set_Table` with safety validation
 - **Linux**: sysfs/hwmon backend — reads `fan*_input`, writes `pwm*`
@@ -184,6 +185,15 @@ The three floors sit on the highest temperature bands and match LenovoLegionTool
 
 **Steps 0–6 may be 0, and 0 stops the fan.** Measured 2026-08-19 ([#18](https://github.com/pjt222/fancontrol/issues/18)): with the minimum table `[0,0,0,0,0,0,0,1,3,5]` in force, both fans held 0 RPM across 17 consecutive samples at 58–62 °C under load, and Performance mode brought 2200 RPM straight back. `CurrentFanMinSpeed = 1600` is the slowest the fan turns *while turning*, not a floor the curve produces. So a curve whose low bands are 0 runs the machine with its fans stopped up to the first non-zero band; the floors permit that on steps 0–6, and the step 7 floor of 1 is where the fan is guaranteed to turn. Choose zeros deliberately.
 
+### Show the power-button LED (Lenovo only)
+
+```bash
+fancontrol led           # button colour white (read: Lighting_Id 4 index 1); SmartFanMode 3 (Performance)
+fancontrol led --json    # {"colour":"white","lighting_id":4,"smart_fan_mode":3,"source":"read","state_index":1}
+```
+
+Reads `LENOVO_LIGHTING_METHOD.Get_Lighting_Current_Status(4)` and maps the state index to the colour measured for it (0 blue, 1 white, 2 red, 3 multi; 2026-09-02). When the read returns nothing, the colour is derived from SmartFanMode and labelled so (`source` `derived_from_mode`); an index outside the measured four shows as unknown with the index, not as a colour (`unmeasured_index`); with nothing readable, `unavailable`. Mode and index are read in one call so the pair is from the same instant. The two are not the same thing: with Performance selected and the barrel adapter out, the register still reads 3 while the index reads 1 and the button is white, on battery and also with a USB-C dock powering the machine (measured 2026-09-03, [#44](https://github.com/pjt222/fancontrol/issues/44)). Which physical LED the index describes is unproven; its index has matched the button in every observed state. The TUI title and the GUI header show the same indicator, and the lighting class is only ever read, never written.
+
 ### Interactive TUI dashboard
 
 ```bash
@@ -246,6 +256,7 @@ Default log level is Warn.
 - Windows generic `Win32_Fan` is read-only — vendor-specific WMI is needed for control
 - Lenovo WMI `Fan_Get_Table` and `Fan_Get_MaxSpeed` return empty data on some firmware
 - `Fan_Set_Table` is confirmed working on the Legion 82RG (#10, load test 2026-08-19: an all-10s curve held 4800 RPM at 61–64 °C where the no-write control sat at 0 RPM), but only fan 0 / sensor 3 has been exercised, and `--fan-id` / `--sensor-id` are accepted without being encoded (#42)
+- The power-button LED indicator reads `Lighting_Id 4`; which physical LED that id describes is unproven, and whether the fans and power limits follow the button on battery is unmeasured (#44)
 - The EC **retains** the last written curve across power-mode switches (measured 2026-08-19; the earlier "lost on power mode change" note here was wrong). Reboot and sleep/wake retention are unmeasured. A retained curve is *latent*: it runs whenever anything selects Custom mode, so leave a safe one behind after experiments (`tools/Reset-LenovoFanState.ps1`). Use `--save` or the TUI `s` key to persist curves for automatic re-application on startup
 
 ## Acknowledgments

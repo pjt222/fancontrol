@@ -16,6 +16,7 @@ use ratatui::widgets::*;
 
 use crate::config;
 use crate::fan::{smart_fan_mode, CustomFanCurve, Fan, FanCurve, MAX_STEP_VALUE, MINIMUM_STEPS};
+use crate::led::{LedIndicator, POWER_BUTTON_LIGHTING_ID};
 use crate::platform::create_controller;
 
 // ---------------------------------------------------------------------------
@@ -93,8 +94,14 @@ const VIRIDIS_HOT: Color = Color::Rgb(253, 231, 37); // step 10 — bright yello
 /// Messages from the background poller to the UI thread.
 enum PollMsg {
     FanData(Vec<Fan>),
-    SmartFanMode(Option<u32>),
-    CustomCurveSet { fan_id: u32, sensor_id: u32 },
+    /// SmartFanMode and `Lighting_Id 4 -> Current_State_Type`, read together
+    /// each cycle and applied together, so a frame never shows a mode from one
+    /// instant beside an index from another.
+    ModeAndLighting(crate::platform::ModeAndLighting),
+    CustomCurveSet {
+        fan_id: u32,
+        sensor_id: u32,
+    },
     CustomCurvesCleared,
     Error(String),
 }
@@ -146,6 +153,9 @@ struct App {
     mode: Mode,
     /// SmartFanMode readback from EC.
     smart_fan_mode: Option<u32>,
+    /// Power-button lighting state index (`Lighting_Id 4`), read beside the
+    /// mode. Resolved to a colour by `led::LedIndicator` at draw time.
+    lighting_index: Option<u32>,
     status: String,
     status_until: Option<Instant>,
     quit: bool,
@@ -165,6 +175,7 @@ impl App {
             selected_fan: 0,
             mode: Mode::FanSelect,
             smart_fan_mode: None,
+            lighting_index: None,
             status: "Loading...".into(),
             status_until: None,
             quit: false,
@@ -565,9 +576,10 @@ fn run_inner() -> Result<()> {
             }
         }
 
-        // Read initial SmartFanMode.
-        if let Ok(mode) = ctrl.get_smart_fan_mode() {
-            let _ = tx.send(PollMsg::SmartFanMode(mode));
+        // Read initial SmartFanMode and the power-button lighting state, as
+        // one pair from one instant.
+        if let Ok(pair) = ctrl.get_mode_and_lighting(POWER_BUTTON_LIGHTING_ID) {
+            let _ = tx.send(PollMsg::ModeAndLighting(pair));
         }
 
         while !stop_poller.load(std::sync::atomic::Ordering::Relaxed) {
@@ -649,9 +661,12 @@ fn run_inner() -> Result<()> {
                     }
                 }
 
-                // Read SmartFanMode each cycle.
-                if let Ok(mode) = ctrl.get_smart_fan_mode() {
-                    let _ = tx.send(PollMsg::SmartFanMode(mode));
+                // Read SmartFanMode and the lighting state each cycle, as one
+                // pair. Both move without this process: Fn+Q, Vantage, and
+                // without the barrel adapter the button changes while the
+                // register does not (CLAUDE.md).
+                if let Ok(pair) = ctrl.get_mode_and_lighting(POWER_BUTTON_LIGHTING_ID) {
+                    let _ = tx.send(PollMsg::ModeAndLighting(pair));
                 }
             }
 
@@ -677,8 +692,9 @@ fn run_inner() -> Result<()> {
         while let Ok(msg) = rx.try_recv() {
             match msg {
                 PollMsg::FanData(fans) => app.update_fans(fans),
-                PollMsg::SmartFanMode(mode) => {
-                    app.smart_fan_mode = mode;
+                PollMsg::ModeAndLighting(pair) => {
+                    app.smart_fan_mode = pair.smart_fan_mode;
+                    app.lighting_index = pair.lighting_state;
                 }
                 PollMsg::CustomCurveSet { fan_id, sensor_id } => {
                     // Mark the editor as held.
@@ -987,12 +1003,32 @@ fn draw_title(f: &mut Frame, app: &App, area: Rect) {
         Some(smart_fan_mode::PERFORMANCE) => VIRIDIS_HOT, // Performance — yellow
         _ => VIRIDIS_TITLE,                             // Balanced/N/A — teal
     };
+    // The power-button LED: read from Lighting_Id 4, or derived from the mode
+    // and labelled so. Shown beside the mode rather than folded into it,
+    // because on battery the two differ (CLAUDE.md, measured 2026-09-03).
+    let led = LedIndicator::resolve(app.lighting_index, app.smart_fan_mode);
+    let (led_glyph, led_color) = match led.colour {
+        Some(colour) => {
+            let (r, g, b) = colour.rgb();
+            ("\u{25CF}", Color::Rgb(r, g, b))
+        }
+        None => ("\u{25CB}", Color::DarkGray),
+    };
     let title_text = Paragraph::new(Line::from(vec![
         Span::styled("Fan Control", Style::default().fg(VIRIDIS_TITLE).bold()),
         Span::raw(" \u{2014} "),
         Span::styled(
             format!("SmartFanMode: {mode_label}"),
             Style::default().fg(mode_color),
+        ),
+        Span::raw(" \u{2014} "),
+        Span::styled(
+            format!("{led_glyph} "),
+            Style::default().fg(led_color).bold(),
+        ),
+        Span::styled(
+            format!("button {}", led.short_label()),
+            Style::default().fg(VIRIDIS_TITLE),
         ),
     ]))
     .alignment(Alignment::Center)
@@ -1689,5 +1725,47 @@ mod tests {
         let mut steps = [0, 0, 0, 0, 0, 0, 0, 0, 0, 255];
         enforce_safety_minimums(&mut steps);
         assert_eq!(steps, [0, 0, 0, 0, 0, 0, 0, 1, 3, 10]);
+    }
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    /// Render the title bar for a mode and a lighting index into text.
+    fn rendered_title(mode: Option<u32>, lighting: Option<u32>) -> String {
+        let mut app = App::new();
+        app.smart_fan_mode = mode;
+        app.lighting_index = lighting;
+        let backend = TestBackend::new(110, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw_title(f, &app, f.area())).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn title_shows_the_read_colour_beside_the_selected_mode() {
+        // The barrel-out case measured 2026-09-03: register 3, index 1. The
+        // title must say white beside Performance and not call it derived.
+        let text = rendered_title(Some(3), Some(1));
+        assert!(text.contains("SmartFanMode: Performance"), "{text}");
+        assert!(text.contains("button white"), "{text}");
+        assert!(!text.contains("derived"), "{text}");
+    }
+
+    #[test]
+    fn title_labels_a_fallback_as_derived_and_an_unmeasured_index_as_unknown() {
+        assert!(rendered_title(Some(3), None).contains("button red (derived)"));
+        assert!(rendered_title(Some(3), Some(7)).contains("button unknown (index 7)"));
+        assert!(rendered_title(None, None).contains("button N/A"));
     }
 }

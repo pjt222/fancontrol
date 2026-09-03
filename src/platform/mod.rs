@@ -49,6 +49,44 @@ pub trait FanController {
             "SmartFanMode not supported on this platform".to_string(),
         ))
     }
+
+    /// Read `Current_State_Type` for one `Lighting_Id` from the Lenovo lighting
+    /// class (`LENOVO_LIGHTING_METHOD.Get_Lighting_Current_Status`). Returns
+    /// `Ok(None)` where the class is absent or the read fails, so callers fall
+    /// back rather than error; the indicator in `crate::led` labels that case
+    /// as derived. Read-only by construction: the setter is never called, and
+    /// `tests/lighting_setter_forbidden.rs` fails the build if it ever is.
+    ///
+    /// Callers pass `crate::led::POWER_BUTTON_LIGHTING_ID`. The id is a
+    /// parameter rather than baked in because which physical LED id 4
+    /// describes is unproven (CLAUDE.md); the method reads a lighting state,
+    /// the caller decides what to call it.
+    fn get_lighting_state(&self, _lighting_id: u32) -> Result<Option<u32>, FanControlError> {
+        Ok(None)
+    }
+
+    /// Read SmartFanMode and one lighting state together.
+    ///
+    /// Backends that can take both in one call override this so the pair comes
+    /// from the same instant. Read separately, a mode that moves between the
+    /// two reads shows for one poll as the register and the index disagreeing,
+    /// which is exactly what the indicator exists to show when it is real
+    /// (barrel adapter out); the pair must not fake it. The default is the two
+    /// separate reads, for backends without either.
+    fn get_mode_and_lighting(&self, lighting_id: u32) -> Result<ModeAndLighting, FanControlError> {
+        Ok(ModeAndLighting {
+            smart_fan_mode: self.get_smart_fan_mode()?,
+            lighting_state: self.get_lighting_state(lighting_id)?,
+        })
+    }
+}
+
+/// SmartFanMode and a lighting state read together; see
+/// [`FanController::get_mode_and_lighting`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ModeAndLighting {
+    pub smart_fan_mode: Option<u32>,
+    pub lighting_state: Option<u32>,
 }
 
 // put id:"platform_select", label:"Platform Detection", node_type:"decision", output:"controller.internal"

@@ -18,8 +18,9 @@ use std::time::Duration;
 use eframe::egui;
 use log::{debug, info, warn};
 
-use crate::fan::{Fan, FanCurve};
-use crate::platform::create_controller;
+use crate::fan::{smart_fan_mode_label, Fan, FanCurve};
+use crate::led::{LedIndicator, POWER_BUTTON_LIGHTING_ID};
+use crate::platform::{create_controller, FanController};
 
 // ---------------------------------------------------------------------------
 // Worker <-> UI protocol
@@ -33,8 +34,31 @@ enum WorkerCommand {
 enum WorkerResponse {
     FanData(Vec<Fan>),
     CurveData(HashMap<String, Vec<FanCurve>>),
-    PwmSet { fan_id: String, pwm: u8 },
+    PwmSet {
+        fan_id: String,
+        pwm: u8,
+    },
+    /// SmartFanMode and `Lighting_Id 4 -> Current_State_Type`, read together
+    /// each poll and applied together, so the header never shows a mode from
+    /// one instant beside an index from another.
+    ModeAndLighting(crate::platform::ModeAndLighting),
     Error(String),
+}
+
+/// Read the mode and the power-button lighting state as one pair and send it.
+/// Called after each discovery: both move without this process (Fn+Q,
+/// Vantage, and without the barrel adapter the button changes while the
+/// register does not).
+fn send_mode_and_lighting(
+    controller: &dyn FanController,
+    response_tx: &mpsc::Sender<WorkerResponse>,
+) {
+    match controller.get_mode_and_lighting(POWER_BUTTON_LIGHTING_ID) {
+        Ok(pair) => {
+            let _ = response_tx.send(WorkerResponse::ModeAndLighting(pair));
+        }
+        Err(e) => debug!("mode and lighting not readable: {e}"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -81,6 +105,7 @@ fn spawn_worker(
                 let _ = response_tx.send(WorkerResponse::Error(error.to_string()));
             }
         }
+        send_mode_and_lighting(controller.as_ref(), &response_tx);
         repaint_ctx.request_repaint();
 
         loop {
@@ -112,6 +137,7 @@ fn spawn_worker(
                             let _ = response_tx.send(WorkerResponse::Error(error.to_string()));
                         }
                     }
+                    send_mode_and_lighting(controller.as_ref(), &response_tx);
                 }
                 WorkerCommand::SetPwm { fan_id, pwm } => {
                     info!("user SetPwm: {fan_id}={pwm}");
@@ -148,6 +174,10 @@ struct FanControlApp {
     slider_values: HashMap<String, f32>,
     /// Curve data per fan, sent once at startup.
     fan_curves: HashMap<String, Vec<FanCurve>>,
+    /// SmartFanMode as last read by the worker.
+    smart_fan_mode: Option<u32>,
+    /// Power-button lighting state index as last read by the worker.
+    lighting_index: Option<u32>,
     status_message: String,
     command_tx: mpsc::Sender<WorkerCommand>,
     response_rx: mpsc::Receiver<WorkerResponse>,
@@ -162,6 +192,8 @@ impl FanControlApp {
             fans: Vec::new(),
             slider_values: HashMap::new(),
             fan_curves: HashMap::new(),
+            smart_fan_mode: None,
+            lighting_index: None,
             status_message: "Discovering fans...".into(),
             command_tx,
             response_rx,
@@ -185,6 +217,10 @@ impl FanControlApp {
                 WorkerResponse::CurveData(curves) => {
                     self.fan_curves = curves;
                 }
+                WorkerResponse::ModeAndLighting(pair) => {
+                    self.smart_fan_mode = pair.smart_fan_mode;
+                    self.lighting_index = pair.lighting_state;
+                }
                 WorkerResponse::PwmSet { fan_id, pwm } => {
                     self.status_message = format!("Set {} PWM to {}", fan_id, pwm);
                 }
@@ -200,10 +236,33 @@ impl eframe::App for FanControlApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_responses();
 
-        // Top panel — header.
+        // Top panel — header with the SmartFanMode and the power-button LED.
+        // The LED is read from Lighting_Id 4 and falls back to the colour
+        // derived from the mode, labelled so; the two differ on battery
+        // (CLAUDE.md, measured 2026-09-03), which is why both are shown.
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(4.0);
-            ui.heading("Fan Control");
+            ui.horizontal(|ui| {
+                ui.heading("Fan Control");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let led = LedIndicator::resolve(self.lighting_index, self.smart_fan_mode);
+                    let (glyph, glyph_colour) = match led.colour {
+                        Some(colour) => {
+                            let (r, g, b) = colour.rgb();
+                            ("\u{25CF}", egui::Color32::from_rgb(r, g, b))
+                        }
+                        None => ("\u{25CB}", egui::Color32::GRAY),
+                    };
+                    // right_to_left: the first widget lands rightmost.
+                    ui.label(format!("button {}", led.short_label()));
+                    ui.colored_label(glyph_colour, glyph);
+                    ui.separator();
+                    ui.label(format!(
+                        "SmartFanMode: {}",
+                        smart_fan_mode_label(self.smart_fan_mode)
+                    ));
+                });
+            });
             ui.add_space(4.0);
         });
 
