@@ -284,6 +284,26 @@ operator's colour in every observed state, and the register failed to in one
 of them. One cycle; the unplug phase stays in the tool's default list so a
 rerun reproduces it.
 
+**The button keys on the barrel adapter, not on external power. Measured
+2026-09-03 16:49 to 16:54 with a Dell WD19S USB-C dock attached (issue #44, the
+comment of that time), Performance selected throughout.** The dock powers the
+machine: with the barrel out, Windows reported external power (`root\wmi
+BatteryStatus.PowerOnline` True, `Win32_Battery.BatteryStatus` 2, unchanged over
+a four-minute poll), yet the button went white and `Lighting_Id 4` read 1 with
+the register at 3, exactly as on battery in run 2; with the barrel back in, id 4
+read 2 and the button was red. Windows' battery class cannot tell the two
+sources apart; three firmware fields can, each measured on one switch each way:
+`LENOVO_OTHER_METHOD.Get_AC_PD_Status` reads `AC_PD_Status` 0 with the barrel
+and 258 with USB-C PD as the source (run 1's constant 0 was read with the barrel
+in, so it was consistent and told nothing); `LENOVO_GAMEZONE_DATA.GetPowerChargeMode`
+reads `Data` 1 and 2 respectively; `Lighting_Id 3 -> Current_State_Type` is 1
+with either external source and 0 on battery, an external-power flag rather
+than a barrel flag. Vantage's "Netzteil" is the barrel adapter. `fancontrol.exe
+led` from PR #49 read `red (index 2)` with the barrel in and `white (index 1)`
+on dock power, register 3 both times. Unmeasured: barrel only with the dock
+detached; whether fans and power limits follow the button or the register on
+dock power.
+
 **Which sensor row's thresholds index a written table is unmeasured.**
 `encode_fan_table_bytes` hardcodes `FSID = 0`, and the fan 0 / sensor 3 row
 starts `58,58,58,58,67` while the fan 0 / sensor 0 row starts `34,36,43,127`.

@@ -192,7 +192,7 @@ fancontrol led           # button colour white (read: Lighting_Id 4 index 1); Sm
 fancontrol led --json    # {"lighting_id":4,"state_index":1,"smart_fan_mode":3,"colour":"white","source":"read"}
 ```
 
-Reads `LENOVO_LIGHTING_METHOD.Get_Lighting_Current_Status(4)` and maps the state index to the colour measured for it (0 blue, 1 white, 2 red, 3 multi; 2026-09-02). When the read fails, the colour is derived from SmartFanMode and labelled so. The two are not the same thing: with Performance selected and the AC adapter out, the register still reads 3 while the index reads 1 and the button is white (measured 2026-09-03, [#44](https://github.com/pjt222/fancontrol/issues/44)). Which physical LED the index describes is unproven; its index has matched the button in every observed state. The TUI title and the GUI header show the same indicator, and the lighting class is only ever read, never written.
+Reads `LENOVO_LIGHTING_METHOD.Get_Lighting_Current_Status(4)` and maps the state index to the colour measured for it (0 blue, 1 white, 2 red, 3 multi; 2026-09-02). When the read fails, the colour is derived from SmartFanMode and labelled so. The two are not the same thing: with Performance selected and the barrel adapter out, the register still reads 3 while the index reads 1 and the button is white, on battery and also with a USB-C dock powering the machine (measured 2026-09-03, [#44](https://github.com/pjt222/fancontrol/issues/44)). Which physical LED the index describes is unproven; its index has matched the button in every observed state. The TUI title and the GUI header show the same indicator, and the lighting class is only ever read, never written.
 
 ### Interactive TUI dashboard
 

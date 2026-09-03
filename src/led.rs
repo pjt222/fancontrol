@@ -19,8 +19,10 @@
 //! 5526430479, corrected in 5526685189): with Performance selected and the AC
 //! adapter pulled, `GetSmartFanMode` kept reading 3 while id 4 read 1 and the
 //! operator saw the button white; on replug id 4 read 2 again and the button
-//! was red. So the register reports the *selected* mode and id 4 the mode the
-//! button *shows*. The indicator therefore reads id 4 and falls back to the
+//! was red. The same happened at 16:50 with a USB-C dock powering the machine
+//! (Windows reporting external power), so the button keys on the barrel
+//! adapter, not on external power. The register reports the *selected* mode
+//! and id 4 the mode the button *shows*. The indicator therefore reads id 4 and falls back to the
 //! register only when the read fails, labelling the fallback as derived.
 //!
 //! What is not measured, and what the labels must not claim: which physical
@@ -65,10 +67,11 @@ impl LedColour {
         }
     }
 
-    /// Colour the button showed for a SmartFanMode on AC power. Measured
-    /// 2026-09-02 15:27 (operator's report per mode). On battery with
-    /// Performance selected the button showed white, not red, so this table is
-    /// the fallback, not the source.
+    /// Colour the button showed for a SmartFanMode with the barrel adapter in.
+    /// Measured 2026-09-02 15:27 (operator's report per mode). Without the
+    /// barrel (on battery, and on USB-C dock power) with Performance selected
+    /// the button showed white, not red, so this table is the fallback, not
+    /// the source.
     pub fn from_smart_fan_mode(mode: u32) -> Option<Self> {
         match mode {
             smart_fan_mode::QUIET => Some(Self::Blue),
@@ -107,8 +110,8 @@ pub enum LedSource {
     /// `Lighting_Id 4` was read and its index is one of the four measured.
     Read,
     /// The read failed or returned an unmeasured index; the colour is the one
-    /// measured for the SmartFanMode on AC power, which is wrong on battery
-    /// with Performance selected.
+    /// measured for the SmartFanMode with the barrel adapter in, which is wrong
+    /// without it (battery or USB-C dock power) with Performance selected.
     DerivedFromMode,
 }
 
