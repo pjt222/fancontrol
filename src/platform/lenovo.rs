@@ -789,7 +789,6 @@ fn format_ps_byte_array(bytes: &[u8]) -> String {
 // Controller
 // ---------------------------------------------------------------------------
 
-/// Lenovo Legion fan controller backed by vendor-specific WMI classes.
 /// Consecutive lighting-read failures after which the read is suspended.
 ///
 /// A firmware without `LENOVO_LIGHTING_METHOD` fails every time, and the TUI
@@ -802,15 +801,21 @@ const LIGHTING_FAILURES_BEFORE_SUSPEND: u32 = 3;
 /// At the 1.5 s poll that is about one attempt a minute.
 const LIGHTING_RETRY_EVERY: u32 = 40;
 
+/// Lenovo Legion fan controller backed by vendor-specific WMI classes.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub struct LenovoFanController {
     /// Per-fan RPM ranges, populated on first discover().
     fan_ranges: std::cell::RefCell<HashMap<u32, FanRpmRange>>,
     /// Whether the hardcoded-fallback warning has already been emitted.
     warned_default_range: std::cell::Cell<bool>,
-    /// Consecutive failures of the lighting read; reset by a success.
+    /// Consecutive failures of the lighting read; reset by a success. One
+    /// counter for the controller: only `led::POWER_BUTTON_LIGHTING_ID` is
+    /// read today, and reading a second id would need a counter per id, or
+    /// failures on one would suspend the other.
     lighting_failures: std::cell::Cell<u32>,
-    /// Reads skipped while the lighting read is suspended.
+    /// Reads skipped while the lighting read is suspended; reset by a success
+    /// together with the failures, so a retry after the next suspension lands
+    /// a full interval later by construction and not by accident.
     lighting_skips: std::cell::Cell<u32>,
 }
 
@@ -1210,6 +1215,7 @@ impl FanController for LenovoFanController {
             Ok(output) => match parse_lighting_state(&output) {
                 Some(index) => {
                     self.lighting_failures.set(0);
+                    self.lighting_skips.set(0);
                     debug!("Lighting_Id {lighting_id} Current_State_Type = {index}");
                     Ok(Some(index))
                 }
@@ -1231,7 +1237,10 @@ impl FanController for LenovoFanController {
     fn get_mode_and_lighting(&self, lighting_id: u32) -> Result<ModeAndLighting, FanControlError> {
         // One process for both values, so the pair is from the same instant
         // (see the trait doc). Each part catches its own failure and prints
-        // an empty value, so one missing class does not cost the other read.
+        // an empty value, so one missing class does not cost the other read
+        // and the process exits 0, which keeps ps_command from warning on
+        // every suspended retry; the failure is logged by
+        // note_lighting_failure, once at suspension and at debug level after.
         // The lighting part is left out while the read is suspended.
         let read_lighting = self.lighting_read_allowed();
         let lighting_part = if read_lighting {
@@ -1258,6 +1267,7 @@ impl FanController for LenovoFanController {
             match parse_tagged_u32(&output, "LED|") {
                 Some(index) => {
                     self.lighting_failures.set(0);
+                    self.lighting_skips.set(0);
                     Some(index)
                 }
                 None => {

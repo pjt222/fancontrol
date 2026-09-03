@@ -20,9 +20,11 @@
 //! adapter pulled, `GetSmartFanMode` kept reading 3 while id 4 read 1 and the
 //! operator saw the button white; on replug id 4 read 2 again and the button
 //! was red. The same happened at 16:50 with a USB-C dock powering the machine
-//! (Windows reporting external power; comment 5527617570), so the button keys
-//! on the barrel adapter, not on external power. The register reports the
-//! *selected* mode and id 4 the mode the button *shows*. The indicator
+//! (Windows reporting external power; comments 5527617570 and 5527637425).
+//! What varied was the barrel connector; whether the firmware keys on the
+//! connector or on the supply's wattage is not separated by that run
+//! (CLAUDE.md names the confound). The register reports the *selected* mode
+//! and id 4 the mode the button *shows*. The indicator
 //! therefore reads id 4 and falls back to the register only when the read
 //! returns nothing, labelling the fallback as derived.
 //!

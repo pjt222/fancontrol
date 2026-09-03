@@ -99,6 +99,24 @@ fn cmd_led(controller: &dyn FanController, json_output: bool) -> Result<()> {
     let pair = controller.get_mode_and_lighting(POWER_BUTTON_LIGHTING_ID)?;
     let led = LedIndicator::resolve(pair.lighting_state, pair.smart_fan_mode);
 
+    // A value that was not read arrives as None, and the backend keeps the
+    // reason in the log (once at suspension, at debug level otherwise). Say
+    // on stderr that something was not read, so "not readable" in the output
+    // is not mistaken for a fact about the hardware.
+    if pair.smart_fan_mode.is_none() {
+        eprintln!(
+            "warning: SmartFanMode not readable (Lenovo only; other platforms have no such \
+             register). On Lenovo, run with -vv and read fancontrol.log for the reason."
+        );
+    }
+    if pair.lighting_state.is_none() {
+        eprintln!(
+            "warning: Lighting_Id {POWER_BUTTON_LIGHTING_ID} not readable (Lenovo only; other \
+             platforms have no such class). On Lenovo, run with -vv and read fancontrol.log \
+             for the reason."
+        );
+    }
+
     if json_output {
         println!("{}", led.to_json());
         return Ok(());

@@ -1727,3 +1727,45 @@ mod tests {
         assert_eq!(steps, [0, 0, 0, 0, 0, 0, 0, 1, 3, 10]);
     }
 }
+
+#[cfg(test)]
+mod title_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    /// Render the title bar for a mode and a lighting index into text.
+    fn rendered_title(mode: Option<u32>, lighting: Option<u32>) -> String {
+        let mut app = App::new();
+        app.smart_fan_mode = mode;
+        app.lighting_index = lighting;
+        let backend = TestBackend::new(110, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw_title(f, &app, f.area())).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn title_shows_the_read_colour_beside_the_selected_mode() {
+        // The barrel-out case measured 2026-09-03: register 3, index 1. The
+        // title must say white beside Performance and not call it derived.
+        let text = rendered_title(Some(3), Some(1));
+        assert!(text.contains("SmartFanMode: Performance"), "{text}");
+        assert!(text.contains("button white"), "{text}");
+        assert!(!text.contains("derived"), "{text}");
+    }
+
+    #[test]
+    fn title_labels_a_fallback_as_derived_and_an_unmeasured_index_as_unknown() {
+        assert!(rendered_title(Some(3), None).contains("button red (derived)"));
+        assert!(rendered_title(Some(3), Some(7)).contains("button unknown (index 7)"));
+        assert!(rendered_title(None, None).contains("button N/A"));
+    }
+}
