@@ -58,7 +58,8 @@ tools/                      # Reusable tooling — prefer adding here. Logs and 
 ├── Invoke-FanTableLoadTest.ps1  # Holds the CPU above the lowest band and writes curves through the exe (#10). Writes to the EC
 ├── Reset-LenovoFanState.ps1     # Leaves a safe curve loaded and a chosen SmartFanMode selected. Writes to the EC
 ├── Get-LenovoLedSurface.ps1     # Enumerates LENOVO_* classes and the lighting surface (#44). Read-only
-└── Get-LenovoLighting.ps1       # Lighting status per Lighting_Id across a mode sweep, with an operator colour prompt (#44). Writes to the EC
+├── Get-LenovoLighting.ps1       # Lighting status per Lighting_Id across a mode sweep, with an operator colour prompt (#44). Writes to the EC
+└── Watch-LenovoLightingVsMode.ps1  # Lighting state index beside the mode under operator manipulations, never SetSmartFanMode (#44). Read-only unless -IncludeFullSpeed
 ```
 
 **`scripts/` vs `tools/`**: `scripts/` holds historical one-off probes; do not
