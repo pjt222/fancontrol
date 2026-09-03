@@ -459,6 +459,29 @@ function Set-FullSpeedThroughModule {
 
 function Disable-FullSpeedIfCalled {
     if (-not $script:FullSpeedCalled) { return }
+    # Re-read the mode now rather than trusting the phase-start read: two
+    # open-ended operator prompts have passed since. Disabling full speed in
+    # Custom drops straight back to the EC-held table (CLAUDE.md), and the
+    # documented order is to change the power mode first. Neither this tool
+    # nor Fn+Q can enter Custom, so getting here needs Vantage or another
+    # process; the check is cheap and the wrong order is the fans-off hazard.
+    $modeNow = Get-Mode
+    if ("$modeNow" -eq '255') {
+        Write-ToolLog ("  WARNING: the mode reads Custom (255) now. Disabling full speed here would drop to the EC-held table, so the power mode has to change first.")
+        $left = $false
+        try {
+            [void](Read-Operator ("  Press Fn+Q until the OSD shows a mode other than Custom, then press Enter"))
+            $modeNow = Get-Mode
+            $left = ("$modeNow" -ne '255')
+        } catch {
+            $left = $false
+        }
+        if (-not $left) {
+            Write-ToolLog ("  Leaving full speed ON: the mode still reads " + $modeNow + ". Change the power mode first, then run: fancontrol.exe set 0 0")
+            return
+        }
+        Write-ToolLog ("  mode now " + $modeNow + "; disabling full speed.")
+    }
     Write-ToolLog "  Disabling full speed again."
     [void](Set-FullSpeedThroughModule -On $false)
     Start-Sleep -Milliseconds 700
