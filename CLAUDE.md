@@ -224,7 +224,7 @@ id 0 `Lighting_Type 1, Brightness_Level 4, Default_Brightness_Level 3,
 State_Type_Num 5, Control_Interface 0`; id 4 `Lighting_Type 0, Brightness_Level 0,
 Default_State 1, State_Type_Num 4, Control_Interface 1`. What id 0 is remains
 unmeasured; on 2026-09-03 Fn+Space changed the keyboard colour (operator's report)
-and moved none of ids 0/1/2/3/5.
+and moved none of ids 0/1/2/3/5 (https://github.com/pjt222/fancontrol/issues/44#issuecomment-5525618714).
 `LENOVO_SPECTRUM_METHOD` and `LENOVO_GAMEZONE_LIGHT_PROFILE_DATA` are absent.
 `Get_Lighting_Current_Status(<id>)` takes one integer and returns
 `Current_Brightness_Level` and `Current_State_Type`. Across a SmartFanMode sweep

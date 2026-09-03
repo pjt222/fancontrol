@@ -75,7 +75,8 @@ function Write-WmiProperties {
         # "Das Argument kann nicht an den Parameter "InputObject" gebunden
         # werden, da es NULL ist" inside Invoke-LenovoWmiMethod's try, which
         # then reported "ERROR calling Fan_Set_FullSpeed" for a call that had
-        # taken effect (read back True; measured 2026-09-03 13:58).
+        # taken effect (read back True; measured 2026-09-03 13:58, recorded at
+        # https://github.com/pjt222/fancontrol/issues/44#issuecomment-5525618714).
         [Parameter(Mandatory)][AllowNull()]$InputObject,
         [string]$Indent = "    "
     )

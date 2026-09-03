@@ -31,11 +31,12 @@ manipulations that reach the LED or the mode by other paths:
              that read no-mode or no-reading are the elevated process's WMI
              handles, not a firmware fact; read the register and the index
              from the samples that do read.
-  fnq        Fn+Q once: the EC hotkey path. Sampled once on 2026-09-03: the
-             register and id 4 moved within the same sample, about a second.
+  fnq        Fn+Q once: the EC hotkey path. Sampled once on 2026-09-03 (the
+             #44 comment above): the register and id 4 moved between two
+             consecutive samples one second apart.
   fnspace    Fn+Space once: the usual Lenovo keyboard-backlight binding, which
              on this machine changes the keyboard colour (operator's report,
-             2026-09-03). Tests whether ids 0/1/2/3/5 report any lighting
+             2026-09-03, the #44 comment above). Tests whether ids 0/1/2/3/5 report any lighting
              live; on 2026-09-03 none moved while the keyboard colour did.
              Id 0's descriptor row (quoted in CLAUDE.md) looks like a
              multi-level zone, but nothing has measured what it is.
@@ -54,8 +55,9 @@ button shows. Every sample reads the mode, then each lighting id, then the mode
 again, then Win32_Battery.BatteryStatus and Fan_Get_FullSpeed, and is stamped
 with stopwatch seconds since the window opened plus the sample's own duration.
 Win32_Battery is the adapter column. LENOVO_OTHER_METHOD.Get_AC_PD_Status was
-read once per phase in the 2026-09-03 13:53 run and returned AC_PD_Status = 0
-throughout while the barrel adapter was in, which is not what an adapter
+read once per phase in the 2026-09-03 13:53 run (recorded at
+https://github.com/pjt222/fancontrol/issues/44#issuecomment-5525618714)
+and returned AC_PD_Status = 0 throughout while the barrel adapter was in, which is not what an adapter
 indicator would show; it is not read any more.
 Sampling runs as fast as the calls return, targeting one sample per second;
 the label carries the measured time, not the target.
