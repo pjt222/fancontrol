@@ -45,10 +45,14 @@ the label carries the measured time, not the target.
 
 Disagreement, per sample: when the two mode reads agree and the mode is one of
 1/2/3/255, the expected id 4 index is the measured table above. A sample whose
-id 4 index differs is re-read twice within about a second. If any re-read pair
-agrees again it is logged as transient (a switch landed mid-sample); if all
-persist it is sustained. Only sustained counts toward the verdict; both are
-counted. A mode outside the table gives no expectation, not a disagreement.
+id 4 index differs is re-read about every 0.4 s until it agrees again or
+-MismatchTimeoutSeconds pass. Agreement at the same mode makes it transient
+(a switch landed mid-sample, or the index repainted late); the mode moving
+during the re-reads makes it inconclusive; outlasting the timeout with the
+mode holding still makes it sustained. A sustained episode that agrees again
+later in the window at the same mode is reported as lag, and only a
+sustained episode that never agrees again counts as a disagreement in the
+verdict. A mode outside the table gives no expectation, not a disagreement.
 
 Why a new tool rather than a switch on Get-LenovoLighting.ps1: that tool is a
 write-driven sweep (it writes a curve, then sets the mode per step). This one
@@ -69,6 +73,14 @@ battery may be delayed.
 .PARAMETER LightingIds
 Ids passed to Get_Lighting_Current_Status each sample. Must include 4 for the
 verdict to mean anything.
+
+.PARAMETER MismatchTimeoutSeconds
+How long a disagreeing pair is re-read, about 0.4 s apart, before the episode
+counts as sustained. The only latency figure on record is that id 4 read the
+new index about a second after a WMI SetSmartFanMode (the 800 ms sleep before
+the read in Get-LenovoLighting.ps1); the hotkey path is unmeasured. A repaint
+slower than this timeout is logged as sustained and then as resolved when a
+later sample agrees at the same mode, which the summary reports as lag.
 
 .PARAMETER IncludeFullSpeed
 Add the fullspeed phase. This is the only write the tool can make. It goes
@@ -100,6 +112,7 @@ param(
     [string[]]$Phases = @('baseline', 'unplug', 'replug', 'fnq', 'fnspace', 'vantage'),
     [int]$PhaseSeconds = 20,
     [int]$UnplugSeconds = 30,
+    [int]$MismatchTimeoutSeconds = 5,
     [int[]]$LightingIds = @(0, 1, 2, 3, 4, 5),
     [switch]$IncludeFullSpeed,
     [switch]$Json
@@ -276,37 +289,46 @@ function Read-Operator {
 }
 
 function Resolve-Mismatch {
-    # A sample disagreed. Re-read the pair twice, about 0.4 s apart, before
-    # classifying: a switch that landed between the mode read and the id 4
-    # read looks like a disagreement for exactly one sample.
-    param($FirstMode, $FirstState4, $Expected)
-    $pairs = New-Object System.Collections.ArrayList
-    for ($i = 0; $i -lt 2; $i++) {
+    # A sample disagreed. Keep re-reading the pair, about 0.4 s apart, until
+    # it agrees again or the timeout passes. A switch that lands between the
+    # mode read and the id 4 read, and an index that repaints some time after
+    # the register, both look like a disagreement for a while; only one that
+    # outlasts the timeout with the mode holding still is sustained. A pair
+    # counts as agreeing only at the mode the mismatch was seen at: if the
+    # mode moved during the re-reads, agreement at the new mode says nothing
+    # about the old one, and the episode is inconclusive.
+    param($FirstMode, $FirstState4, $Expected, [int]$TimeoutSeconds)
+    $clock = [System.Diagnostics.Stopwatch]::StartNew()
+    $detail = @()
+    $kind = 'sustained'
+    $agreedAfter = $null
+    while ($clock.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
         Start-Sleep -Milliseconds 400
         $m = Get-Mode
         $s = Get-State4
-        $e = Get-ExpectedIndex $m
-        [void]$pairs.Add(@{ mode = $m; state = $s; expected = $e })
+        $t = [Math]::Round($clock.Elapsed.TotalSeconds, 1)
+        $detail += ("+" + $t + " s mode " + $m + " id4 " + $s)
+        if ("$m" -ne "$FirstMode") { $kind = 'inconclusive'; break }
+        if ($null -ne $s -and "$s" -eq "$Expected") { $kind = 'transient'; $agreedAfter = $t; break }
     }
-    $agreeing = 0
-    foreach ($p in $pairs) {
-        if ($null -ne $p.expected -and $null -ne $p.state -and "$($p.state)" -eq "$($p.expected)") { $agreeing++ }
+    return @{
+        kind = $kind; agreedAfter = $agreedAfter; heldFor = [Math]::Round($clock.Elapsed.TotalSeconds, 1)
+        detail = ($detail -join '; '); first = ("mode " + $FirstMode + " id4 " + $FirstState4 + " expected " + $Expected)
     }
-    $detail = @()
-    foreach ($p in $pairs) { $detail += ("mode " + $p.mode + " id4 " + $p.state + " expected " + $p.expected) }
-    $kind = $(if ($agreeing -gt 0) { 'transient' } else { 'sustained' })
-    return @{ kind = $kind; detail = ($detail -join '; '); first = ("mode " + $FirstMode + " id4 " + $FirstState4 + " expected " + $Expected) }
 }
 
 function Invoke-SampleWindow {
     # Sample for $Seconds, logging every sample. Returns the per-window record.
-    param([string]$Key, [int]$Seconds)
+    param([int]$Seconds)
     $window = [System.Diagnostics.Stopwatch]::StartNew()
-    $counts = [ordered]@{ samples = 0; agree = 0; transient = 0; sustained = 0; switching = 0; 'no-expectation' = 0; 'no-reading' = 0; 'no-mode' = 0 }
+    $counts = [ordered]@{ samples = 0; agree = 0; transient = 0; sustained = 0; 'sustained-continued' = 0; inconclusive = 0; switching = 0; 'no-expectation' = 0; 'no-reading' = 0; 'no-mode' = 0 }
     $changedFields = @{}
     $battLabels = @{}
     $first = $null; $last = $null; $prev = $null
     $mismatches = New-Object System.Collections.ArrayList
+    # The sustained episode still open, if any. A later sample that agrees at
+    # the same mode closes it as lag rather than as a standing divergence.
+    $open = $null
     while ($window.Elapsed.TotalSeconds -lt $Seconds) {
         $t0 = [Math]::Round($window.Elapsed.TotalSeconds, 1)
         $sample = Read-Sample
@@ -322,6 +344,9 @@ function Invoke-SampleWindow {
         # keeps @() empty rather than one $null element.
         $changed = @(Get-ChangedFields -Prev $prev -Cur $sample -Ids $LightingIds | Where-Object { $null -ne $_ })
         foreach ($f in $changed) { $changedFields[$f] = $true }
+        # The mode moved since the previous sample. A mismatch right after
+        # that is the shape a repaint lag takes, and is tagged so.
+        $postSwitch = ($null -ne $prev -and "$($prev.modeAfter)" -ne "$($sample.modeBefore)")
 
         $tag = ''
         if ($changed.Count -gt 0) { $tag = '  CHANGE: ' + ($changed -join ', ') }
@@ -334,25 +359,50 @@ function Invoke-SampleWindow {
 
         if ($verdict -eq 'mismatch') {
             $expected = Get-ExpectedIndex $sample.modeBefore
-            $res = Resolve-Mismatch -FirstMode $sample.modeBefore -FirstState4 $state4 -Expected $expected
-            $counts[$res.kind]++
-            [void]$mismatches.Add(@{ t = $t0; kind = $res.kind; first = $res.first; rereads = $res.detail })
-            if ($res.kind -eq 'sustained') {
-                Write-ToolLog ("      WARNING: SUSTAINED disagreement. First: " + $res.first + ". Re-reads: " + $res.detail)
+            if ($null -ne $open -and "$($open.mode)" -eq "$($sample.modeBefore)" -and "$($open.state4)" -eq "$state4") {
+                # The same divergence as the open episode; no second timeout loop.
+                $counts['sustained-continued']++
+                Write-ToolLog ("      still disagreeing (episode opened at t=" + $open.t + " s)")
             } else {
-                Write-ToolLog ("      transient mismatch (agreed again on re-read). First: " + $res.first + ". Re-reads: " + $res.detail)
+                $res = Resolve-Mismatch -FirstMode $sample.modeBefore -FirstState4 $state4 -Expected $expected -TimeoutSeconds $MismatchTimeoutSeconds
+                $counts[$res.kind]++
+                $episode = @{
+                    t = $t0; kind = $res.kind; postSwitch = $postSwitch; mode = $sample.modeBefore; state4 = $state4
+                    first = $res.first; rereads = $res.detail; agreedAfter = $res.agreedAfter; heldFor = $res.heldFor; resolvedAt = $null
+                }
+                [void]$mismatches.Add($episode)
+                $switchNote = $(if ($postSwitch) { ' (the mode had moved since the previous sample)' } else { '' })
+                switch ($res.kind) {
+                    'transient'    { Write-ToolLog ("      transient mismatch: agreed again after " + $res.agreedAfter + " s" + $switchNote + ". First: " + $res.first + ". Re-reads: " + $res.detail) }
+                    'inconclusive' { Write-ToolLog ("      mismatch inconclusive: the mode moved during the re-reads" + $switchNote + ". First: " + $res.first + ". Re-reads: " + $res.detail) }
+                    default        {
+                        $open = $episode
+                        Write-ToolLog ("      WARNING: SUSTAINED disagreement, held " + $res.heldFor + " s with the mode at " + $sample.modeBefore + $switchNote + ". First: " + $res.first + ". Re-reads: " + $res.detail)
+                    }
+                }
             }
         } else {
             $counts[$verdict]++
+            if ($null -ne $open -and $verdict -eq 'agree' -and "$($open.mode)" -eq "$($sample.modeBefore)") {
+                $open['resolvedAt'] = $t0
+                Write-ToolLog ("      agreement resumed at t=" + $t0 + " s, " + [Math]::Round($t0 - $open.t, 1) + " s after the sustained mismatch at t=" + $open.t + " s, at the same mode: consistent with a repaint lag beyond the timeout; a standing divergence would not agree again without a mode change")
+                $open = $null
+            }
         }
 
         $prev = $sample
         $rest = 1000 - $sample.ms
         if ($rest -gt 0 -and $window.Elapsed.TotalSeconds -lt $Seconds) { Start-Sleep -Milliseconds $rest }
     }
+    $unresolved = 0; $resolvedLags = @()
+    foreach ($ep in $mismatches) {
+        if ($ep.kind -ne 'sustained') { continue }
+        if ($null -eq $ep.resolvedAt) { $unresolved++ } else { $resolvedLags += [Math]::Round($ep.resolvedAt - $ep.t, 1) }
+    }
     return @{
         counts = $counts; changed = @($changedFields.Keys | Sort-Object); battLabels = @($battLabels.Keys | Sort-Object)
-        first = $first; last = $last; mismatches = $mismatches; seconds = [Math]::Round($window.Elapsed.TotalSeconds, 1)
+        first = $first; last = $last; mismatches = $mismatches; unresolved = $unresolved; resolvedLags = $resolvedLags
+        seconds = [Math]::Round($window.Elapsed.TotalSeconds, 1)
     }
 }
 
@@ -443,6 +493,7 @@ function Invoke-Phase {
         modeAtStart = $null; modeAtEnd = $null; state4AtStart = $null; state4AtEnd = $null
         battAtStart = $null; battAtEnd = $null; changed = @(); battLabels = @()
         counts = $null; colour = $null; vantageOffer = $null; note = ''
+        unresolved = 0; resolvedLags = @(); mismatches = @()
     }
     Write-ToolLog ""
     Write-ToolLog ("=== Phase " + $Key + ": " + $spec.title + " ===")
@@ -522,10 +573,13 @@ function Invoke-Phase {
     }
 
     Write-ToolLog ("  sampling for " + $seconds + " s (" + $instruction + ")")
-    $win = Invoke-SampleWindow -Key $Key -Seconds $seconds
+    $win = Invoke-SampleWindow -Seconds $seconds
     $record['counts'] = $win.counts
     $record['changed'] = $win.changed
     $record['battLabels'] = $win.battLabels
+    $record['unresolved'] = $win.unresolved
+    $record['resolvedLags'] = @($win.resolvedLags)
+    $record['mismatches'] = @($win.mismatches)
     if ($null -ne $win.first) {
         $record['state4AtStart'] = $(if ($win.first.states.Contains('4')) { $win.first.states['4'].s } else { $null })
         $record['battAtStart'] = $win.first.batt
@@ -537,7 +591,9 @@ function Invoke-Phase {
     }
     $c = $win.counts
     Write-ToolLog ("  window closed after " + $win.seconds + " s: " + $c['samples'] + " samples; agree " + $c['agree'] +
-                   ", transient " + $c['transient'] + ", sustained " + $c['sustained'] + ", switching " + $c['switching'] +
+                   ", transient " + $c['transient'] + ", inconclusive " + $c['inconclusive'] +
+                   ", sustained " + $c['sustained'] + " (unresolved " + $win.unresolved + ", continued " + $c['sustained-continued'] + ")" +
+                   ", switching " + $c['switching'] +
                    ", no-expectation " + $c['no-expectation'] + ", no-reading " + $c['no-reading'] + ", no-mode " + $c['no-mode'])
     if ($win.changed.Count -gt 0) {
         Write-ToolLog ("  fields that moved during the window: " + ($win.changed -join ', '))
@@ -673,19 +729,24 @@ try {
 if ($phaseRecords.Count -gt 0) {
     Write-ToolLog ""
     Write-ToolLog "--- Per phase: mode and id 4 at start -> end, battery, fields that moved, sample verdicts, operator colour ---"
-    $sustainedTotal = 0; $transientTotal = 0; $expectTotal = 0
+    Write-ToolLog "    (mode and id 4 at the end are the pair re-read at the operator's answer; battery at the end is the window's last sample)"
+    $sustainedTotal = 0; $unresolvedTotal = 0; $transientTotal = 0; $inconclusiveTotal = 0; $expectTotal = 0
+    $lagsAll = @()
     $manipulations = @()
-    $sustainedIn = @()
+    $unresolvedIn = @()
     foreach ($r in $phaseRecords) {
         if ($r['skipped']) {
             Write-ToolLog ("  " + $r['key'] + ": skipped (" + $r['skipReason'] + ")")
             continue
         }
         $c = $r['counts']
-        $agree = 0; $tr = 0; $su = 0; $n = 0
-        if ($null -ne $c) { $agree = $c['agree']; $tr = $c['transient']; $su = $c['sustained']; $n = $c['samples'] }
-        $sustainedTotal += $su; $transientTotal += $tr; $expectTotal += ($agree + $tr + $su)
-        if ($su -gt 0) { $sustainedIn += ($r['key'] + " (" + $su + ")") }
+        $agree = 0; $tr = 0; $su = 0; $suc = 0; $inc = 0; $n = 0
+        if ($null -ne $c) { $agree = $c['agree']; $tr = $c['transient']; $su = $c['sustained']; $suc = $c['sustained-continued']; $inc = $c['inconclusive']; $n = $c['samples'] }
+        $un = [int]$r['unresolved']
+        $sustainedTotal += $su; $unresolvedTotal += $un; $transientTotal += $tr; $inconclusiveTotal += $inc
+        $expectTotal += ($agree + $tr + $su + $suc + $inc)
+        $lagsAll += @($r['resolvedLags'])
+        if ($un -gt 0) { $unresolvedIn += ($r['key'] + " (" + $un + ")") }
         # Baseline is the control; a vantage phase answered "none" is a second
         # control, not a manipulation, and must not pad the verdict's count.
         $isControl = ($r['key'] -eq 'baseline')
@@ -697,26 +758,31 @@ if ($phaseRecords.Count -gt 0) {
         $colour = $(if ($null -eq $r['colour'] -or $r['colour'].Length -eq 0) { '(not observed)' } else { $r['colour'] })
         $moved = $(if ($r['changed'].Count -gt 0) { ($r['changed'] -join ', ') } else { 'none' })
         $label = $(if ($r['label'].Length -gt 0) { ' [' + $r['label'] + ']' } else { '' })
+        $lagText = $(if (@($r['resolvedLags']).Count -gt 0) { '; sustained episodes that agreed again later: ' + (@($r['resolvedLags']) -join ', ') + ' s' } else { '' })
         Write-ToolLog ("  " + $r['key'] + $label + ": mode " + $r['modeAtStart'] + " -> " + $r['modeAtEnd'] +
                        ", id4 " + $r['state4AtStart'] + " -> " + $r['state4AtEnd'] +
                        ", battery " + $r['battAtStart'] + " -> " + $r['battAtEnd'] +
                        "; moved: " + $moved +
-                       "; " + $n + " samples, agree " + $agree + ", transient " + $tr + ", sustained " + $su +
+                       "; " + $n + " samples, agree " + $agree + ", transient " + $tr + ", inconclusive " + $inc + ", sustained " + $su + " (unresolved " + $un + ")" + $lagText +
                        "; colour: " + $colour)
         if ($r['note'].Length -gt 0) { Write-ToolLog ("      note: " + $r['note']) }
         if ($null -ne $r['vantageOffer']) { Write-ToolLog ("      Vantage offers: '" + $r['vantageOffer'] + "'") }
     }
     Write-ToolLog ""
-    if ($sustainedTotal -gt 0) {
-        $verdict = "Lighting_Id 4 DISAGREED with SmartFanMode (sustained) in: " + ($sustainedIn -join ', ') + ". Read those phases' sample lines; the WARNING lines carry the re-reads."
+    if ($unresolvedTotal -gt 0) {
+        $verdict = "Lighting_Id 4 DISAGREED with SmartFanMode: " + $unresolvedTotal + " sustained episode(s) never agreed again within the window, in: " + ($unresolvedIn -join ', ') + ". Read those phases' sample lines; the WARNING lines carry the re-reads."
+    } elseif ($sustainedTotal -gt 0) {
+        $verdict = "No standing disagreement: " + $sustainedTotal + " sustained episode(s) all agreed again later at the same mode (after " + ($lagsAll -join ', ') + " s), across " + $expectTotal + " samples with an expectation and " + $manipulations.Count + " manipulations (" + ($manipulations -join ', ') + "). Consistent with a repaint lag beyond the " + $MismatchTimeoutSeconds + " s timeout; a standing divergence would not have agreed again without a mode change."
     } else {
-        $verdict = "Lighting_Id 4 did not disagree with SmartFanMode across " + $expectTotal + " samples with an expectation (" + $transientTotal + " transient mismatches at switches) and " + $manipulations.Count + " manipulations (" + ($manipulations -join ', ') + ")."
+        $verdict = "Lighting_Id 4 did not disagree with SmartFanMode across " + $expectTotal + " samples with an expectation (" + $transientTotal + " transient mismatches that agreed on re-read, " + $inconclusiveTotal + " inconclusive) and " + $manipulations.Count + " manipulations (" + ($manipulations -join ', ') + ")."
     }
     Write-ToolLog ("VERDICT: " + $verdict)
     Write-ToolLog ("The fullspeed phase, if run, also answers whether the LED changes under full speed (the operator's colour in that row); its samples count toward the verdict like any other window.")
     $result['verdict'] = $verdict
     $result['sustained'] = $sustainedTotal
+    $result['unresolved'] = $unresolvedTotal
     $result['transient'] = $transientTotal
+    $result['inconclusive'] = $inconclusiveTotal
     $result['samplesWithExpectation'] = $expectTotal
     $phaseObjects = @()
     foreach ($r in $phaseRecords) { $phaseObjects += (New-Object PSObject -Property $r) }
